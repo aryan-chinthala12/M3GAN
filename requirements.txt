@@ -1,0 +1,20 @@
+# Audio Signal Processing & DSP
+librosa>=0.10.1
+soundfile>=0.12.1
+scipy>=1.11.0
+numpy>=1.26.0
+
+# FastAPI Backend Server
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+python-multipart>=0.0.9
+pydantic>=2.6.0
+
+# Streamlit Frontend UI
+streamlit>=1.32.0
+streamlit-mic-recorder>=0.0.8
+
+# Data Visualization & Utilities
+matplotlib>=3.8.0
+requests>=2.31.0
+python-dotenv>=1.0.1
