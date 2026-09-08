@@ -17,7 +17,7 @@ const EMPTY_INDICATORS = [
   ["Pitch Volatility", "—"],
   ["RMS Energy", "—"],
   ["Emotion Confidence", "—"],
-  ["NLP Emotion", "—"],
+  ["Speech Emotion", acoustic?.top_emotion],
   ["Threat Level", "—"],
 ];
 
@@ -49,86 +49,6 @@ function formatIndicatorValue(key, value) {
   }
 
   return String(value).replaceAll("_", " ").toUpperCase();
-}
-
-async function blobToWav(blob) {
-  const arrayBuffer = await blob.arrayBuffer();
-  const AudioContextClass =
-    window.AudioContext || window.webkitAudioContext;
-
-  if (!AudioContextClass) {
-    throw new Error("This browser does not support audio decoding.");
-  }
-
-  const audioContext = new AudioContextClass();
-
-  try {
-    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-    const wavBuffer = encodeWav(audioBuffer);
-    return new Blob([wavBuffer], { type: "audio/wav" });
-  } finally {
-    await audioContext.close();
-  }
-}
-
-function encodeWav(audioBuffer) {
-  const channelCount = audioBuffer.numberOfChannels;
-  const sampleRate = audioBuffer.sampleRate;
-  const frameCount = audioBuffer.length;
-
-  // Interleave all channels into signed 16-bit PCM.
-  const interleaved = new Float32Array(frameCount * channelCount);
-
-  for (let channel = 0; channel < channelCount; channel += 1) {
-    const channelData = audioBuffer.getChannelData(channel);
-
-    for (let frame = 0; frame < frameCount; frame += 1) {
-      interleaved[frame * channelCount + channel] += channelData[frame];
-    }
-  }
-
-  for (let frame = 0; frame < frameCount; frame += 1) {
-    for (let channel = 0; channel < channelCount; channel += 1) {
-      interleaved[frame * channelCount + channel] /= channelCount;
-    }
-  }
-
-  const bytesPerSample = 2;
-  const dataSize = interleaved.length * bytesPerSample;
-  const buffer = new ArrayBuffer(44 + dataSize);
-  const view = new DataView(buffer);
-
-  const writeString = (offset, value) => {
-    for (let index = 0; index < value.length; index += 1) {
-      view.setUint8(offset + index, value.charCodeAt(index));
-    }
-  };
-
-  writeString(0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeString(8, "WAVE");
-  writeString(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, 1, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * bytesPerSample, true);
-  view.setUint16(32, bytesPerSample, true);
-  view.setUint16(34, 16, true);
-  writeString(36, "data");
-  view.setUint32(40, dataSize, true);
-
-  let offset = 44;
-
-  for (let index = 0; index < interleaved.length; index += 1) {
-    const sample = Math.max(-1, Math.min(1, interleaved[index]));
-    const pcm = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-
-    view.setInt16(offset, pcm, true);
-    offset += 2;
-  }
-
-  return buffer;
 }
 
 export default function LiveAssessment() {
@@ -247,8 +167,7 @@ export default function LiveAssessment() {
           );
         }
 
-        const wavBlob = await blobToWav(recordedBlob);
-        const result = await analyzeAudio(wavBlob, language);
+        const result = await analyzeAudio(recordedBlob, language);
 
         setAnalysis(result);
         setStatus("complete");
@@ -277,11 +196,10 @@ export default function LiveAssessment() {
 
   const indicatorRows = analysis
     ? [
-        ["Top Emotion", acoustic?.top_emotion],
+        ["Speech Emotion", acoustic?.top_emotion],
         ["Pitch Volatility", acoustic?.pitch_volatility],
         ["RMS Energy", acoustic?.rms_energy],
         ["Emotion Confidence", acoustic?.confidence],
-        ["NLP Emotion", nlp?.detected_emotion],
         ["Threat Level", nlp?.threat_level],
       ]
     : EMPTY_INDICATORS;

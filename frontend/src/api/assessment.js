@@ -4,10 +4,14 @@ const API_BASE_URL =
 export async function analyzeAudio(blob, language) {
   const formData = new FormData();
 
-  formData.append("file", blob, "live-assessment.wav");
-  // Kept for forward compatibility with the multilingual backend.
-  // The current backend accepts the audio file only, so it will ignore
-  // additional form fields until language-aware processing is added.
+  const extension = blob.type.includes("ogg") ? "ogg" : "webm";
+
+  formData.append(
+    "file",
+    blob,
+    `live-assessment.${extension}`
+  );
+
   formData.append("language", language);
 
   const response = await fetch(
@@ -23,15 +27,14 @@ export async function analyzeAudio(blob, language) {
   try {
     payload = await response.json();
   } catch {
-    // Preserve a useful error below when the backend returns non-JSON.
+    // Backend returned a non-JSON response.
   }
 
   if (!response.ok) {
-    const detail =
+    throw new Error(
       payload?.detail ||
-      `Analysis failed with HTTP ${response.status}.`;
-
-    throw new Error(detail);
+      `Analysis failed with HTTP ${response.status}.`
+    );
   }
 
   return payload;
