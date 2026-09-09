@@ -8,13 +8,20 @@ class AcousticIndicators(BaseModel):
     confidence: float = Field(..., json_schema_extra={"example": 88.5})
 
 class NLPIndicators(BaseModel):
-    detected_emotion: str = Field(..., json_schema_extra={"example": "SADNESS"})
-    threat_level: str = Field(..., json_schema_extra={"example": "HIGH"})
+    threat_level: str = Field(
+        ...,
+        json_schema_extra={"example": "HIGH"}
+    )
     flagged_keywords: List[str] = Field(
-        default_factory=list, 
+        default_factory=list,
         json_schema_extra={"example": ["giving up", "no way out"]}
     )
 
+class SpeechIndicators(BaseModel):
+    detected_emotion: str = Field(
+        ...,
+        json_schema_extra={"example": "SAD"}
+    )
 class SVIMetrics(BaseModel):
     final_svi_score: float = Field(..., json_schema_extra={"example": 84.2})
     risk_band: str = Field(..., json_schema_extra={"example": "CRITICAL"})
