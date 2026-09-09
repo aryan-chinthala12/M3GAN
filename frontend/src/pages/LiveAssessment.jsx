@@ -9,8 +9,14 @@ import {
   AlertCircle,
   CheckCircle2,
   Send,
+  Upload,
+  FileAudio,
+  X,
 } from "lucide-react";
 import { analyzeAudio } from "../api/assessment";
+
+const MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024;
+const ACCEPTED_AUDIO_EXTENSIONS = ["wav", "mp3", "m4a", "webm", "ogg", "flac"];
 
 const EMPTY_INDICATORS = [
   ["Top Emotion", "—"],
@@ -35,6 +41,14 @@ function formatDuration(seconds) {
   return `${String(minutes).padStart(2, "0")}:${String(
     remainingSeconds
   ).padStart(2, "0")}`;
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024 * 1024) {
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  }
+
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function getRiskStyle(level) {
@@ -132,17 +146,21 @@ function encodeWav(audioBuffer) {
 }
 
 export default function LiveAssessment() {
+  const [assessmentMode, setAssessmentMode] = useState("live");
   const [isRecording, setIsRecording] = useState(false);
   const [duration, setDuration] = useState(0);
   const [language, setLanguage] = useState("Hindi");
   const [status, setStatus] = useState("idle");
   const [analysis, setAnalysis] = useState(null);
   const [error, setError] = useState("");
+  const [selectedAudioFile, setSelectedAudioFile] = useState(null);
+  const [uploadedDuration, setUploadedDuration] = useState(null);
 
   const mediaRecorderRef = useRef(null);
   const streamRef = useRef(null);
   const timerRef = useRef(null);
   const chunksRef = useRef([]);
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
     return () => {
@@ -153,6 +171,108 @@ export default function LiveAssessment() {
       }
     };
   }, []);
+
+  const resetSelectedFile = () => {
+    setSelectedAudioFile(null);
+    setUploadedDuration(null);
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
+  const handleAssessmentModeChange = (mode) => {
+    setAssessmentMode(mode);
+    setError("");
+
+    if (mode === "live") {
+      resetSelectedFile();
+    }
+  };
+
+  const readAudioDuration = (file) => {
+    const audioUrl = URL.createObjectURL(file);
+    const audio = new Audio();
+
+    audio.preload = "metadata";
+    audio.onloadedmetadata = () => {
+      setUploadedDuration(
+        Number.isFinite(audio.duration) ? audio.duration : null
+      );
+      URL.revokeObjectURL(audioUrl);
+    };
+    audio.onerror = () => {
+      setUploadedDuration(null);
+      URL.revokeObjectURL(audioUrl);
+    };
+    audio.src = audioUrl;
+  };
+
+  const handleFileSelection = (event) => {
+    const file = event.target.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    const extension = file.name.split(".").pop()?.toLowerCase();
+
+    if (!extension || !ACCEPTED_AUDIO_EXTENSIONS.includes(extension)) {
+      resetSelectedFile();
+      setError("Select a supported audio file: WAV, MP3, M4A, WebM, OGG, or FLAC.");
+      return;
+    }
+
+    if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+      resetSelectedFile();
+      setError("Audio files must be 25 MB or smaller.");
+      return;
+    }
+
+    setError("");
+    setAnalysis(null);
+    setSelectedAudioFile(file);
+    setUploadedDuration(null);
+    readAudioDuration(file);
+  };
+
+  const prepareUploadedAudio = async (file) => {
+    const extension = file.name.split(".").pop()?.toLowerCase();
+
+    if (extension !== "webm" && extension !== "ogg") {
+      return file;
+    }
+
+    const wavBlob = await blobToWav(file);
+    const filename = file.name.replace(/\.(webm|ogg)$/i, ".wav");
+
+    return new File([wavBlob], filename, { type: "audio/wav" });
+  };
+
+  const analyzeUploadedAudio = async () => {
+    if (!selectedAudioFile) {
+      setError("Select an audio file before starting the assessment.");
+      return;
+    }
+
+    setStatus("analyzing");
+    setError("");
+
+    try {
+      const audioForAnalysis = await prepareUploadedAudio(selectedAudioFile);
+      const result = await analyzeAudio(audioForAnalysis, language);
+
+      setAnalysis(result);
+      setStatus("complete");
+    } catch (analysisError) {
+      console.error("Uploaded audio assessment error:", analysisError);
+      setError(
+        analysisError?.message ||
+          "The audio could not be analyzed. Please check that the FastAPI backend is running."
+      );
+      setStatus("error");
+    }
+  };
 
   const startAssessment = async () => {
     setError("");
@@ -270,6 +390,9 @@ export default function LiveAssessment() {
 
   const riskLevel = analysis?.svi_metrics?.risk_band || null;
   const sviScore = analysis?.svi_metrics?.final_svi_score ?? null;
+  const safetyOverrideTriggered =
+    analysis?.svi_metrics?.override_triggered === true;
+  const safetyOverrideReason = analysis?.svi_metrics?.override_reason;
   const acoustic = analysis?.acoustic_indicators;
   const nlp = analysis?.nlp_indicators;
   const explainability = analysis?.explainability;
@@ -307,79 +430,188 @@ export default function LiveAssessment() {
       </div>
 
       <div className="bg-white rounded-lg border border-slate-200 shadow-sm p-6">
-        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
-          <div className="flex items-center gap-4">
-            <div
-              className={`w-14 h-14 rounded-full flex items-center justify-center ${
-                isRecording
-                  ? "bg-red-100 text-red-600"
-                  : status === "analyzing"
-                    ? "bg-amber-100 text-amber-700"
-                    : "bg-slate-100 text-slate-600"
-              }`}
-            >
-              {isRecording ? (
-                <Activity className="w-7 h-7 animate-pulse" />
-              ) : status === "analyzing" ? (
-                <Activity className="w-7 h-7 animate-pulse" />
-              ) : (
-                <Mic className="w-7 h-7" />
-              )}
-            </div>
-
-            <div>
-              <h3 className="font-semibold text-slate-900">
-                {isRecording
-                  ? "Assessment in progress"
-                  : status === "analyzing"
-                    ? "Processing assessment"
-                    : status === "complete"
-                      ? "Assessment ready for review"
-                      : "Ready for assessment"}
-              </h3>
-
-              <p className="text-sm text-slate-500">
-                {status === "idle"
-                  ? "Start the assessment when the complainant is ready."
-                  : status === "recording"
-                    ? "Listening to incoming voice..."
-                    : status === "analyzing"
-                      ? "Sending captured audio to the AI assessment engine."
-                      : status === "complete"
-                        ? "Review the generated indicators below."
-                        : status === "error"
-                          ? "Resolve the issue and try the assessment again."
-                          : "Ready."}
-              </p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2 text-slate-600">
-            <Clock className="w-5 h-5" />
-            <span className="font-mono text-lg">
-              {formatDuration(duration)}
-            </span>
-          </div>
-
-          {!isRecording ? (
-            <button
-              onClick={startAssessment}
-              disabled={status === "analyzing"}
-              className="flex items-center justify-center gap-2 bg-slate-900 text-white px-6 py-3 rounded-lg font-medium hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              <Mic className="w-5 h-5" />
-              {status === "complete" ? "Start New Assessment" : "Start Assessment"}
-            </button>
-          ) : (
-            <button
-              onClick={stopAssessment}
-              className="flex items-center justify-center gap-2 bg-red-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-red-700 transition-colors"
-            >
-              <Square className="w-5 h-5" />
-              Stop & Analyze
-            </button>
-          )}
+        <div className="flex flex-wrap gap-2 border-b border-slate-200 pb-4 mb-5" role="tablist" aria-label="Assessment input mode">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={assessmentMode === "live"}
+            onClick={() => handleAssessmentModeChange("live")}
+            disabled={isRecording || status === "analyzing"}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+              assessmentMode === "live"
+                ? "bg-slate-900 text-white"
+                : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+            }`}
+          >
+            Live Recording
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={assessmentMode === "upload"}
+            onClick={() => handleAssessmentModeChange("upload")}
+            disabled={isRecording || status === "analyzing"}
+            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+              assessmentMode === "upload"
+                ? "bg-slate-900 text-white"
+                : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+            }`}
+          >
+            Upload Audio
+          </button>
         </div>
+
+        {assessmentMode === "live" ? (
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
+            <div className="flex items-center gap-4">
+              <div
+                className={`w-14 h-14 rounded-full flex items-center justify-center ${
+                  isRecording
+                    ? "bg-red-100 text-red-600"
+                    : status === "analyzing"
+                      ? "bg-amber-100 text-amber-700"
+                      : "bg-slate-100 text-slate-600"
+                }`}
+              >
+                {isRecording ? (
+                  <Activity className="w-7 h-7 animate-pulse" />
+                ) : status === "analyzing" ? (
+                  <Activity className="w-7 h-7 animate-pulse" />
+                ) : (
+                  <Mic className="w-7 h-7" />
+                )}
+              </div>
+
+              <div>
+                <h3 className="font-semibold text-slate-900">
+                  {isRecording
+                    ? "Assessment in progress"
+                    : status === "analyzing"
+                      ? "Processing assessment"
+                      : status === "complete"
+                        ? "Assessment ready for review"
+                        : "Ready for assessment"}
+                </h3>
+
+                <p className="text-sm text-slate-500">
+                  {status === "idle"
+                    ? "Start the assessment when the complainant is ready."
+                    : status === "recording"
+                      ? "Listening to incoming voice..."
+                      : status === "analyzing"
+                        ? "Sending captured audio to the AI assessment engine."
+                        : status === "complete"
+                          ? "Review the generated indicators below."
+                          : status === "error"
+                            ? "Resolve the issue and try the assessment again."
+                            : "Ready."}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 text-slate-600">
+              <Clock className="w-5 h-5" />
+              <span className="font-mono text-lg">
+                {formatDuration(duration)}
+              </span>
+            </div>
+
+            {!isRecording ? (
+              <button
+                onClick={startAssessment}
+                disabled={status === "analyzing"}
+                className="flex items-center justify-center gap-2 bg-slate-900 text-white px-6 py-3 rounded-lg font-medium hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <Mic className="w-5 h-5" />
+                {status === "complete" ? "Start New Assessment" : "Start Assessment"}
+              </button>
+            ) : (
+              <button
+                onClick={stopAssessment}
+                className="flex items-center justify-center gap-2 bg-red-600 text-white px-6 py-3 rounded-lg font-medium hover:bg-red-700 transition-colors"
+              >
+                <Square className="w-5 h-5" />
+                Stop & Analyze
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="flex items-center gap-4">
+              <div className={`w-14 h-14 rounded-full flex items-center justify-center ${
+                status === "analyzing" ? "bg-amber-100 text-amber-700" : "bg-slate-100 text-slate-600"
+              }`}>
+                {status === "analyzing" ? (
+                  <Activity className="w-7 h-7 animate-pulse" />
+                ) : (
+                  <Upload className="w-7 h-7" />
+                )}
+              </div>
+              <div>
+                <h3 className="font-semibold text-slate-900">
+                  {status === "analyzing" ? "Processing uploaded audio" : "Upload audio for assessment"}
+                </h3>
+                <p className="text-sm text-slate-500">
+                  Select a WAV, MP3, M4A, WebM, OGG, or FLAC file up to 25 MB.
+                </p>
+              </div>
+            </div>
+
+            <input
+              ref={fileInputRef}
+              id="audio-upload"
+              type="file"
+              accept="audio/wav,audio/mpeg,audio/mp4,audio/webm,audio/ogg,audio/flac,.wav,.mp3,.m4a,.webm,.ogg,.flac"
+              onChange={handleFileSelection}
+              disabled={status === "analyzing"}
+              className="sr-only"
+            />
+            <label
+              htmlFor="audio-upload"
+              className="flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed border-slate-300 bg-slate-50 px-6 py-7 text-center cursor-pointer hover:border-slate-400 hover:bg-slate-100 transition-colors"
+            >
+              <FileAudio className="w-7 h-7 text-slate-500" />
+              <span className="text-sm font-semibold text-slate-700">Choose an audio file</span>
+              <span className="text-xs text-slate-500">Supported formats: WAV, MP3, M4A, WebM, OGG, FLAC</span>
+            </label>
+
+            {selectedAudioFile && (
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 rounded-lg border border-slate-200 bg-white p-4">
+                <div className="min-w-0 flex items-center gap-3">
+                  <FileAudio className="w-5 h-5 text-amber-600 flex-shrink-0" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-slate-800 truncate">{selectedAudioFile.name}</p>
+                    <p className="text-xs text-slate-500">
+                      {formatFileSize(selectedAudioFile.size)}
+                      {uploadedDuration !== null && ` · ${formatDuration(Math.round(uploadedDuration))}`}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={resetSelectedFile}
+                  disabled={status === "analyzing"}
+                  className="inline-flex items-center justify-center gap-1.5 text-sm font-medium text-slate-600 hover:text-slate-900 disabled:opacity-50"
+                >
+                  <X className="w-4 h-4" />
+                  Remove
+                </button>
+              </div>
+            )}
+
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={analyzeUploadedAudio}
+                disabled={!selectedAudioFile || status === "analyzing"}
+                className="flex items-center justify-center gap-2 bg-slate-900 text-white px-6 py-3 rounded-lg font-medium hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <Upload className="w-5 h-5" />
+                {status === "analyzing" ? "Analyzing Audio..." : "Analyze Audio"}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {error && (
@@ -475,34 +707,24 @@ export default function LiveAssessment() {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         <div className="bg-white p-6 rounded-lg border border-slate-200 shadow-sm">
-          <h3 className="font-semibold text-slate-800">
-            Stress Vulnerability Index
+          <h3 className="font-semibold text-slate-800 uppercase tracking-wider text-xs">
+            SVI Score
           </h3>
 
           <p className="text-xs text-slate-500 mt-1">
-            AI-assisted screening indicator
+            Numerical multimodal distress indicator
           </p>
 
           <div className="mt-6 flex items-end gap-2">
             <span className="text-5xl font-extrabold text-slate-900">
-              {sviScore === null ? "--" : sviScore.toFixed(1)}
+              {sviScore === null ? "--" : sviScore.toFixed(2)}
             </span>
             <span className="text-slate-500 mb-2">/ 100</span>
           </div>
 
           <div className="mt-4 w-full h-3 bg-slate-100 rounded-full overflow-hidden">
             <div
-              className={`h-full rounded-full transition-all ${
-                riskLevel === "CRITICAL"
-                  ? "bg-red-500"
-                  : riskLevel === "HIGH"
-                    ? "bg-orange-500"
-                    : riskLevel === "MODERATE"
-                      ? "bg-yellow-500"
-                      : riskLevel === "LOW"
-                        ? "bg-green-500"
-                        : "bg-slate-300"
-              }`}
+              className="h-full rounded-full bg-slate-700 transition-all"
               style={{
                 width: `${Math.max(
                   0,
@@ -512,22 +734,27 @@ export default function LiveAssessment() {
             />
           </div>
 
-          <div
-            className={`mt-4 inline-flex px-3 py-1 rounded-full border text-xs font-semibold ${
-              riskLevel
-                ? getRiskStyle(riskLevel)
-                : "border-slate-300 bg-slate-50 text-slate-500"
-            }`}
-          >
-            {riskLevel || "Awaiting assessment"}
-          </div>
-
-          {analysis?.svi_metrics?.override_triggered && (
-            <p className="text-xs text-red-700 mt-3 font-medium">
-              Override triggered:{" "}
-              {analysis.svi_metrics.override_reason || "High-risk indicator detected."}
+          <section className="mt-6 pt-5 border-t border-slate-200">
+            <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+              Situation Severity
             </p>
-          )}
+
+            <div
+              className={`mt-3 inline-flex px-3 py-1.5 rounded-full border text-sm font-bold ${
+                riskLevel
+                  ? getRiskStyle(riskLevel)
+                  : "border-slate-300 bg-slate-50 text-slate-500"
+              }`}
+            >
+              {riskLevel || "Awaiting assessment"}
+            </div>
+
+            {safetyOverrideTriggered && (
+              <p className="text-xs text-red-700 mt-3 font-medium">
+                {safetyOverrideReason || "Safety override triggered"}
+              </p>
+            )}
+          </section>
         </div>
 
         <div className="bg-white p-6 rounded-lg border border-slate-200 shadow-sm">

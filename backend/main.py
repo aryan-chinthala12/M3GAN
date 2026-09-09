@@ -1,6 +1,7 @@
 import os
 import shutil
 import tempfile
+import logging
 from datetime import datetime
 from typing import Optional
 from contextlib import asynccontextmanager
@@ -10,6 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.schemas import AudioAnalysisResponse, InterventionRequest, InterventionResponse
 from backend.svi_engine import SVIEngine
+
+logger = logging.getLogger(__name__)
 
 # Global Engine Instance
 svi_engine: Optional[SVIEngine] = None
@@ -49,13 +52,20 @@ def read_root():
         "docs": "/docs"
     }
 
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy" if svi_engine is not None else "starting",
+        "engine_ready": svi_engine is not None
+    }
+
 @app.post("/api/v1/analyze-audio", response_model=AudioAnalysisResponse)
 async def analyze_audio(file: UploadFile = File(...)):
     """Primary REST endpoint for processing audio calls and computing SVI scores."""
     if svi_engine is None:
         raise HTTPException(status_code=500, detail="SVI Engine is not initialized")
 
-    if not file.filename or not file.filename.endswith(('.wav', '.mp3', '.flac', '.m4a')):
+    if not file.filename or not file.filename.lower().endswith(('.wav', '.mp3', '.flac', '.m4a')):
         raise HTTPException(status_code=400, detail="Invalid audio format. Please upload .wav, .mp3, or .flac")
 
     # Save incoming upload to temp file
@@ -66,6 +76,12 @@ async def analyze_audio(file: UploadFile = File(...)):
     try:
         results = svi_engine.process_multimodal_audio(temp_path, file.filename)
         return results
+    except Exception as exc:
+        logger.exception("Audio analysis failed for %s", file.filename)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Audio analysis failed: {exc}"
+        ) from exc
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)

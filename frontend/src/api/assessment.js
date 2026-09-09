@@ -1,10 +1,14 @@
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
-export async function analyzeAudio(blob, language) {
+export async function analyzeAudio(audio, language, filename) {
   const formData = new FormData();
 
-  formData.append("file", blob, "live-assessment.wav");
+  formData.append(
+    "file",
+    audio,
+    filename || audio?.name || "live-assessment.wav"
+  );
   // Kept for forward compatibility with the multilingual backend.
   // The current backend accepts the audio file only, so it will ignore
   // additional form fields until language-aware processing is added.
