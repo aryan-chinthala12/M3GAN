@@ -1,15 +1,18 @@
 import os
 import shutil
 import tempfile
+import logging
 from datetime import datetime
 from typing import Optional
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.schemas import AudioAnalysisResponse, InterventionRequest, InterventionResponse
 from backend.svi_engine import SVIEngine
+
+logger = logging.getLogger(__name__)
 
 # Global Engine Instance
 svi_engine: Optional[SVIEngine] = None
@@ -51,62 +54,34 @@ def read_root():
 
 @app.get("/health")
 def health_check():
-    if svi_engine is None:
-        return {
-            "status": "initializing",
-            "engine_ready": False,
-        }
-
     return {
-        "status": "healthy",
-        "engine_ready": True,
-        "models": {
-            "speech_emotion": True,
-            "whisper": True,
-        },
+        "status": "healthy" if svi_engine is not None else "starting",
+        "engine_ready": svi_engine is not None
     }
 
 @app.post("/api/v1/analyze-audio", response_model=AudioAnalysisResponse)
-async def analyze_audio(
-    file: UploadFile = File(...),
-    language: str = Form("English"),
-):
+async def analyze_audio(file: UploadFile = File(...)):
     """Primary REST endpoint for processing audio calls and computing SVI scores."""
     if svi_engine is None:
         raise HTTPException(status_code=500, detail="SVI Engine is not initialized")
 
-    allowed_extensions = (
-        ".wav",
-        ".mp3",
-        ".flac",
-        ".m4a",
-        ".webm",
-        ".ogg",
-    )
-
-    if not file.filename or not file.filename.lower().endswith(allowed_extensions):
-        raise HTTPException(
-             status_code=400,
-             detail="Invalid audio format."
-        )
+    if not file.filename or not file.filename.lower().endswith(('.wav', '.mp3', '.flac', '.m4a')):
+        raise HTTPException(status_code=400, detail="Invalid audio format. Please upload .wav, .mp3, or .flac")
 
     # Save incoming upload to temp file
-    extension = os.path.splitext(file.filename)[1].lower()
-
-    with tempfile.NamedTemporaryFile(
-        delete=False,
-        suffix=extension
-    ) as temp_audio:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_audio:
         shutil.copyfileobj(file.file, temp_audio)
         temp_path = temp_audio.name
 
     try:
-        result = svi_engine.process_multimodal_audio(
-            temp_path,
-            file.filename,
-            language
-        )
-        return result
+        results = svi_engine.process_multimodal_audio(temp_path, file.filename)
+        return results
+    except Exception as exc:
+        logger.exception("Audio analysis failed for %s", file.filename)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Audio analysis failed: {exc}"
+        ) from exc
     finally:
         if os.path.exists(temp_path):
             os.remove(temp_path)

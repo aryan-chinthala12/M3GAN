@@ -1,17 +1,17 @@
 const API_BASE_URL =
   import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
 
-export async function analyzeAudio(blob, language) {
+export async function analyzeAudio(audio, language, filename) {
   const formData = new FormData();
-
-  const extension = blob.type.includes("ogg") ? "ogg" : "webm";
 
   formData.append(
     "file",
-    blob,
-    `live-assessment.${extension}`
+    audio,
+    filename || audio?.name || "live-assessment.wav"
   );
-
+  // Kept for forward compatibility with the multilingual backend.
+  // The current backend accepts the audio file only, so it will ignore
+  // additional form fields until language-aware processing is added.
   formData.append("language", language);
 
   const response = await fetch(
@@ -27,14 +27,15 @@ export async function analyzeAudio(blob, language) {
   try {
     payload = await response.json();
   } catch {
-    // Backend returned a non-JSON response.
+    // Preserve a useful error below when the backend returns non-JSON.
   }
 
   if (!response.ok) {
-    throw new Error(
+    const detail =
       payload?.detail ||
-      `Analysis failed with HTTP ${response.status}.`
-    );
+      `Analysis failed with HTTP ${response.status}.`;
+
+    throw new Error(detail);
   }
 
   return payload;

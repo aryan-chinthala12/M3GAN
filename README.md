@@ -1,139 +1,369 @@
 # M3GAN 🎙️
 
-AI-powered real-time multimodal stress and trauma assessment engine.
+### AI-Assisted Multimodal Stress & Trauma Assessment System
 
-**M3GAN** is a production-grade multimodal processing engine designed for real-time distress detection and automated emotional triage on emergency support helplines, including integration pathways for the **National Helpline Against Atrocities (NHAA - 14566)** under the **Department of Social Justice and Empowerment (DoSJE)**, Government of India.
+M3GAN is an AI-assisted multimodal assessment system designed to help helpline operators identify distress and potentially high-risk situations from voice interactions.
 
-The system extracts real-time vocal biomarkers—pitch volatility and volume energy—and fuses them with Speech Emotion Recognition (SER) and Speech-to-Text (STT) lexical threat detection to compute a dynamic **Stress Vulnerability Index (SVI)** (`0–100`) and trigger emergency response routing.
+The system combines **speech emotion analysis, acoustic voice biomarkers, speech-to-text transcription, and linguistic distress indicators** to calculate a **Stress Vulnerability Index (SVI)** and provide a separate **Situation Severity** classification for human review.
 
----
+M3GAN is being developed in the context of the **Smart India Hackathon 2026** problem statement:
 
-## 📌 Problem Statement & Context
+> **SIH26093 — AI-Based Real-Time Stress and Trauma Assessment Module for Victims/Complainants Accessing NHAA (14566) and Integrated Portal**
 
-Victims of atrocities and severe distress contacting emergency helplines often suffer from hyperventilation, emotional shock, or acute trauma. Traditional manual triage or text-only chatbots introduce critical delays during high-priority emergency windows.
-
-**M3GAN** solves this by delivering **instant multimodal triage** at both the acoustic signal level (*how a voice sounds*) and the lexical content level (*what is spoken*). This allows helpline operators and emergency responders to immediately identify high-risk callers, bypass manual routing, and prioritize life-saving intervention.
+The system is designed as a **decision-support tool**. It does not replace trained helpline operators, clinical professionals, or authorized emergency responders.
 
 ---
 
-## ⚡ Core Capabilities
+## 📌 Problem Statement
 
-* **Multimodal Data Fusion:** Fuses Wav2Vec 2.0 Speech Emotion Recognition (SER) with Faster-Whisper Speech-to-Text (STT) transcription.
-* **Acoustic Biomarker Signal Processing:** Uses `librosa` to analyze signal energy (RMS) and fundamental pitch variance (`pitch_std`) to detect voice strain and tremors.
-* **Lexical Threat Override:** Automatically escalates callers to **CRITICAL** risk when active distress keywords (*suicide*, *overdose*, *harm*, *pain*) are detected in transcripts.
-* **Stress Vulnerability Index (SVI):** A mathematical scoring model mapping acoustic strain, emotional weights, and lexical risk to a normalized `0–100` scale.
-* **Automated Risk Categorization:** Assigns callers into **LOW**, **MODERATE**, and **CRITICAL** risk tiers accompanied by UI color indicators (`#D32F2F` for Critical).
-* **Actionable Protocol Triggers:** Dynamically generates recommended routing actions ranging from standard logging to `IMMEDIATE_HUMAN_DISPATCH`.
-* **Microservice Architecture:** Modular FastAPI backend connected to an interactive Streamlit agent dashboard.
+Victims and complainants contacting emergency or support helplines may experience severe emotional distress, fear, shock, panic, or trauma.
+
+During a high-priority call, manually assessing the caller's condition can be difficult because important signals may appear simultaneously in:
+
+- The caller's voice
+- Speech patterns
+- Emotional expression
+- Acoustic characteristics
+- Spoken content
+
+M3GAN addresses this challenge by performing multimodal analysis of incoming audio and presenting interpretable indicators to an authorized human operator.
+
+Instead of relying on a single signal, M3GAN combines multiple modalities to provide a broader assessment of the caller's current distress state.
 
 ---
 
-## 🏗️ Architecture & Processing Pipeline
+## 🎯 Objectives
+
+M3GAN aims to:
+
+- Analyze incoming voice recordings using multiple AI and signal-processing techniques.
+- Extract acoustic indicators such as pitch volatility and vocal energy.
+- Perform Speech Emotion Recognition (SER).
+- Convert speech into text using Speech-to-Text (STT).
+- Detect distress-related linguistic indicators.
+- Calculate a normalized **Stress Vulnerability Index (SVI)** from 0–100.
+- Separately classify the operational **Situation Severity**.
+- Detect explicit high-risk safety indicators through a deterministic safety override.
+- Provide explainable assessment factors.
+- Recommend appropriate next-step actions for human operators.
+- Support both **live microphone recording** and **uploaded audio files**.
+
+---
+
+# ⚡ Key Features
+
+## 🎙️ Live Voice Assessment
+
+The frontend can capture audio directly from the user's microphone through the browser.
+
+The captured recording is sent to the FastAPI backend for multimodal analysis.
+
+---
+
+## 📁 Audio File Assessment
+
+M3GAN also supports assessment from previously recorded audio files.
+
+Supported formats include:
+
+- WAV
+- MP3
+- M4A
+- WebM
+- OGG
+- FLAC
+
+Live recordings and uploaded recordings use the same backend analysis pipeline.
+
+---
+
+## 🧠 Speech Emotion Recognition
+
+M3GAN uses a Wav2Vec 2.0-based Speech Emotion Recognition model to estimate the emotional characteristics of the speaker.
+
+The system considers the **emotion probability distribution** rather than treating the confidence of only the top emotion as the complete distress score.
+
+---
+
+## 🎚️ Acoustic Voice Analysis
+
+The audio processing pipeline extracts voice biomarkers including:
+
+- Fundamental frequency (F0)
+- Pitch volatility
+- Median pitch
+- RMS energy
+- Energy variation
+- Number of voiced frames
+
+Pitch volatility is calculated using robust voiced F0 estimation and converted into a relative semitone-based measure, reducing dependence on the speaker's absolute pitch.
+
+---
+
+## 📝 Speech-to-Text
+
+The system uses **Faster-Whisper** to convert incoming speech into text.
+
+The resulting transcript is then used for linguistic analysis and explainability.
+
+---
+
+## 🔎 Linguistic Distress Indicators
+
+The transcript is analyzed for distress-related linguistic indicators.
+
+Ordinary distress-related language contributes to the linguistic component of the SVI.
+
+Explicit high-risk safety indicators are handled separately through the safety-override mechanism.
+
+---
+
+# 📊 Stress Vulnerability Index (SVI)
+
+The **Stress Vulnerability Index (SVI)** is a numerical score from:
 
 ```text
-                     [ Incoming Audio File (.wav / .mp3) ]
-                                       │
-                                       ▼
-                       ┌───────────────┴───────────────┐
-                       │   Audio Processing Engine     │
-                       └───────────────┬───────────────┘
-                                       │
-            ┌──────────────────────────┼──────────────────────────┐
-            ▼                          ▼                          ▼
-  ┌───────────────────┐      ┌───────────────────┐      ┌───────────────────┐
-  │ Audio Processor   │      │ Wav2Vec 2.0 (SER) │      │  Faster-Whisper   │
-  │ Pitch Std / RMS   │      │ Emotion & Conf.   │      │  Transcription    │
-  └─────────┬─────────┘      └─────────┬─────────┘      └─────────┬─────────┘
-            │                          │                          │
-            │                          │                ┌─────────┴─────────┐
-            │                          │                │ Keyword Scanner   │
-            │                          │                │ Threat Keywords   │
-            │                          │                └─────────┬─────────┘
-            │                          │                          │
-            └──────────────────────────┼──────────────────────────┘
-                                       │
-                                       ▼
-                       ┌───────────────┴───────────────┐
-                       │       SVI Fusion Engine       │
-                       │   Score (0-100) + Overrides   │
-                       └───────────────┬───────────────┘
-                                       │
-                                       ▼
-                       ┌───────────────┴───────────────┐
-                       │ FastAPI Backend (/analyze)    │
-                       │ Returns AudioAnalysisResponse │
-                       └───────────────┬───────────────┘
-                                       │
-                                       ▼
-                       ┌───────────────┴───────────────┐
-                       │   Streamlit Agent Dashboard   │
-                       └───────────────────────────────┘
+0 → 100
 ```
----
 
-## 🛠️ Tech Stack
+The current multimodal SVI combines three components:
 
-| Layer | Technology | Version / Details |
-| :--- | :--- | :--- |
-| **Backend** | FastAPI `0.110.0+` | Asynchronous REST API server & router |
-| **Audio Processing** | Librosa / SciPy `0.10.1+` | Pitch tracking (`piptrack`), RMS energy, DSP routines |
-| **ML Engine** | Wav2Vec 2.0 | `ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition` |
-| **STT Engine** | Faster-Whisper `1.0.0+` | CTranslate2-accelerated Speech-to-Text (`tiny` model) |
-| **Frontend** | Real-time agent monitoring interface nd something _____|
-| **Validation** | Pydantic v2 `2.6.0+` | Strict JSON schema definitions & request parsing |
+```text
+SVI =
+    45% Emotion Distress
+  + 30% Acoustic Stress
+  + 25% Linguistic Distress
+```
 
----
+### 1. Emotion Distress — 45%
 
-## 🚀 API Endpoints
+Derived from the model's complete emotion probability distribution.
 
-The backend exposes REST endpoints at `http://127.0.0.1:8000`. Interactive documentation is available via `/docs`.
+This provides a more stable representation of emotional distress than simply using the highest-confidence emotion.
 
-| Method | Path | Description |
-| :--- | :--- | :--- |
-| `POST` | `/api/v1/analyze-audio` | Primary multimodal analysis (`.wav`/`.mp3` upload → STT + SER + SVI) |
-| `POST` | `/api/v1/interventions/respond` | Record agent acknowledgment and log escalation response |
-| `GET` | `/health` | Health check (Engine status + model loading states) |
+### 2. Acoustic Stress — 30%
 
-### Request & Response Details
+Derived from acoustic voice characteristics including:
 
-* **`POST /api/v1/analyze-audio`**
-  * **Payload:** `multipart/form-data` with `file`
-  * **Response:** Returns `duration_seconds`, `transcript`, `acoustic_indicators`, `nlp_indicators`, `svi_metrics`, and `recommended_interventions`.
+- Pitch volatility
+- RMS energy
+- Vocal energy variation
 
-* **`POST /api/v1/interventions/respond`**
-  * **Payload:** `{"call_id": "string", "operator_id": "string", "action_taken": "string", "notes": "string"}`
+### 3. Linguistic Distress — 25%
+
+Derived from distress-related indicators detected in the transcript.
 
 ---
 
-## 📊 SVI Scoring Model & Risk Bands
+# 🚨 SVI Score vs Situation Severity
 
-The **Stress Vulnerability Index (SVI)** maps raw signal processing values, machine learning outputs, and keyword matches into a unified score scaled from `0` to `100`.
+M3GAN intentionally separates the **numerical SVI Score** from the operational **Situation Severity**.
 
-| Score Range | Risk Band | Color Code | Protocol Trigger |
-| :--- | :--- | :--- | :--- |
-| `0 – 39` | **LOW** | `#2E7D32` (Green) | Routine logging, standard response queue |
-| `40 – 69` | **MODERATE** | `#ED6C02` (Orange) | Senior agent review, priority queue placement |
-| `70 – 100` | **CRITICAL** | `#D32F2F` (Red) | `IMMEDIATE_HUMAN_DISPATCH`, Safety Team alert |
+### SVI Score
 
-> **Note:** Any detection of critical lexical keywords (e.g., *suicide*, *harm*) triggers an immediate **CRITICAL** override regardless of acoustic scores.
+The SVI is a continuous numerical indicator from 0 to 100.
+
+It represents the combined multimodal assessment.
+
+### Situation Severity
+
+Situation Severity represents the operational classification used to prioritize human attention.
+
+Current severity bands are:
+
+| SVI Score | Situation Severity |
+|---:|---|
+| `< 25` | 🟢 **LOW** |
+| `25 – 49.99` | 🟡 **MODERATE** |
+| `50 – 74.99` | 🟠 **HIGH** |
+| `≥ 75` | 🔴 **CRITICAL** |
+
+However, Situation Severity is **not determined solely by the numerical SVI score**.
+
 ---
 
-## 📁 Project Directory Structure
+# 🛡️ Safety Override
+
+Certain explicit high-risk statements require special handling.
+
+M3GAN therefore maintains a separate **safety override mechanism**.
+
+When an explicit high-risk safety indicator is detected, the system can classify the situation as:
+
+```text
+CRITICAL
+```
+
+even when the numerical SVI score is below the normal CRITICAL threshold.
+
+This separation prevents an explicit safety concern from being hidden by a relatively low numerical multimodal score.
+
+### Example
+
+A caller may receive:
+
+```text
+SVI Score: 67.58 / 100
+
+Situation Severity: CRITICAL
+```
+
+The numerical score and operational severity are intentionally different.
+
+The safety override does **not** modify the numerical SVI score.
+
+---
+
+# 👤 Human-in-the-Loop Design
+
+M3GAN is designed as an **AI-assisted decision-support system**.
+
+The AI provides:
+
+- Multimodal indicators
+- SVI score
+- Situation severity
+- Explainability
+- Recommended interventions
+- Safety alerts
+
+The final decision remains with an **authorized human operator**.
+
+M3GAN should not be treated as:
+
+- A clinical diagnostic system
+- A replacement for trained counselors
+- An autonomous emergency decision-maker
+- A substitute for professional assessment
+
+---
+
+# 🏗️ System Architecture
+
+```text
+                         ┌─────────────────────┐
+                         │     Audio Input     │
+                         │                     │
+                         │  Live Microphone    │
+                         │        OR           │
+                         │   Uploaded Audio    │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │  Audio Processing   │
+                         │                     │
+                         │  • Resampling       │
+                         │  • Validation       │
+                         │  • F0 Extraction    │
+                         │  • RMS Analysis     │
+                         └──────────┬──────────┘
+                                    │
+                 ┌──────────────────┼──────────────────┐
+                 │                  │                  │
+                 ▼                  ▼                  ▼
+        ┌────────────────┐ ┌────────────────┐ ┌────────────────┐
+        │ Acoustic       │ │ Speech Emotion │ │ Speech-to-Text │
+        │ Analysis       │ │ Recognition    │ │                │
+        │                │ │                │ │ Faster-Whisper │
+        │ F0 / RMS /     │ │ Wav2Vec 2.0    │ │                │
+        │ Energy         │ │                │ │ Transcript     │
+        └───────┬────────┘ └───────┬────────┘ └───────┬────────┘
+                │                  │                  │
+                │                  │                  ▼
+                │                  │         ┌────────────────┐
+                │                  │         │   Linguistic   │
+                │                  │         │    Analysis    │
+                │                  │         └───────┬────────┘
+                │                  │                 │
+                └──────────────────┼─────────────────┘
+                                   ▼
+                         ┌─────────────────────┐
+                         │    SVI Fusion       │
+                         │      Engine         │
+                         │                     │
+                         │ Emotion     45%     │
+                         │ Acoustic    30%     │
+                         │ Linguistic  25%     │
+                         └──────────┬──────────┘
+                                    │
+                      ┌─────────────┴─────────────┐
+                      │                           │
+                      ▼                           ▼
+             ┌─────────────────┐        ┌─────────────────┐
+             │   SVI Score     │        │ Safety Override │
+             │     0–100       │        │                 │
+             └────────┬────────┘        └────────┬────────┘
+                      │                          │
+                      └────────────┬─────────────┘
+                                   ▼
+                         ┌─────────────────────┐
+                         │ Situation Severity  │
+                         │                     │
+                         │ LOW / MODERATE /   │
+                         │ HIGH / CRITICAL     │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │ Explainability &    │
+                         │ Recommended Actions │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │  Human Operator     │
+                         │      Review         │
+                         └─────────────────────┘
+```
+
+---
+
+# 🛠️ Technology Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | React 19 |
+| Build Tool | Vite |
+| UI Styling | Tailwind CSS |
+| UI Icons | Lucide React |
+| Backend | Python |
+| API Framework | FastAPI |
+| Server | Uvicorn |
+| Audio Processing | Librosa |
+| Numerical Processing | NumPy / SciPy |
+| Speech Emotion Recognition | Wav2Vec 2.0 |
+| Speech-to-Text | Faster-Whisper |
+| Data Validation | Pydantic |
+| Model Runtime | PyTorch |
+| Model Hosting | Hugging Face Hub |
+| Version Control | Git / GitHub |
+
+---
+
+# 📁 Project Structure
 
 ```text
 M3GAN/
+│
 ├── backend/
-│   ├── __init__.py           # Package initialization
-│   ├── config.py             # Feature weights, thresholds, and risk parameters
-│   ├── audio_processor.py    # Librosa signal processing and biomarker routines
-│   ├── schemas.py            # Pydantic schema definitions
-│   ├── svi_engine.py         # SVI scoring algorithms, SER, Whisper STT & threat rules
-│   └── main.py               # FastAPI router and server initialization
+│   ├── __init__.py
+│   ├── audio_processor.py
+│   ├── config.py
+│   ├── main.py
+│   ├── schemas.py
+│   ├── svi_engine.py
+│   │
+│   └── scripts/
+│       └── train_model.py
+│
 ├── frontend/
-│   └── xyz           
-├── scripts/
-│   └── train_model.py        # Offline dataset training & fine-tuning script
-├── sample_data/              # Sample audio files for testing
-├── requirements.txt          # Python dependency manifest
-├── .gitignore                # System and python cache exclusions
-└── README.md                 # System documentation
+│   ├── public/
+│   ├── src/
+│   │   ├── api/
+│   │   │   └── assessment.js
+│   │   │
+│   │   ├── components/
+│   │   ├── data/
+│   │   ├── pages/
+│

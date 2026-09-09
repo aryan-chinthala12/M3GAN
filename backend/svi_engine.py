@@ -1,551 +1,590 @@
 import os
 import re
 import torch
-import torch.nn as nn
 import numpy as np
 
-# Disable symlinks warning on Windows
+# Disable symlinks for Hugging Face on Windows
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
-from transformers import (
-    Wav2Vec2Model,
-    Wav2Vec2Config,
-    Wav2Vec2FeatureExtractor,
-)
-from huggingface_hub import hf_hub_download
-from safetensors.torch import load_file
+from transformers import pipeline
 from faster_whisper import WhisperModel
 
 from backend.audio_processor import AudioProcessor
 from backend.config import (
-    WEIGHT_ML_EMOTION,
-    WEIGHT_ACOUSTIC,
+    ACOUSTIC_PITCH_WEIGHT,
+    ACOUSTIC_RMS_WEIGHT,
+    PITCH_VOLATILITY_NORMALIZATION,
     RISK_RULES,
+    RMS_NORMALIZATION,
+    WEIGHT_ACOUSTIC,
+    WEIGHT_EMOTION,
+    WEIGHT_LINGUISTIC,
 )
 from backend.schemas import (
     AudioAnalysisResponse,
     AcousticIndicators,
     NLPIndicators,
     SVIMetrics,
-    Explainability,
+    Explainability
 )
 
 
-MODEL_ID = "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
-
-
-class LegacyEmotionClassifier(nn.Module):
-    """
-    Compatibility model for the legacy Wav2Vec2 emotion checkpoint.
-    """
-
-    def __init__(self, config):
-        super().__init__()
-
-        self.wav2vec2 = Wav2Vec2Model(config)
-
-        self.classifier = nn.ModuleDict({
-            "dense": nn.Linear(
-                config.hidden_size,
-                config.hidden_size,
-            ),
-            "output": nn.Linear(
-                config.hidden_size,
-                config.num_labels,
-            ),
-        })
-
-    def forward(self, input_values, attention_mask=None):
-        outputs = self.wav2vec2(
-            input_values=input_values,
-            attention_mask=attention_mask,
-        )
-
-        hidden_states = outputs.last_hidden_state
-
-        if attention_mask is not None:
-            feature_attention_mask = (
-                self._get_feature_attention_mask(
-                    attention_mask,
-                    hidden_states.shape[1],
-                )
-            )
-
-            mask = feature_attention_mask.unsqueeze(-1).to(
-                hidden_states.dtype
-            )
-
-            pooled = (
-                (hidden_states * mask).sum(dim=1)
-                / mask.sum(dim=1).clamp(min=1e-9)
-            )
-        else:
-            pooled = hidden_states.mean(dim=1)
-
-        x = self.classifier["dense"](pooled)
-        x = torch.tanh(x)
-
-        logits = self.classifier["output"](x)
-
-        return logits
-
-    def _get_feature_attention_mask(
-        self,
-        attention_mask,
-        feature_length,
-    ):
-        return self.wav2vec2._get_feature_vector_attention_mask(
-            feature_length,
-            attention_mask,
-        )
-
-
 class SVIEngine:
+    """
+    Multimodal Speech Vulnerability Index engine.
+
+    SVI is an engineering-based distress indicator from 0-100.
+    It is NOT a clinical diagnosis or validated psychological scale.
+
+    Components:
+        45% - Speech emotion
+        30% - Acoustic characteristics
+        25% - Linguistic distress indicators
+    """
+
+    # =========================================================
+    # SVI WEIGHTS
+    # =========================================================
+
+    EMOTION_WEIGHT = WEIGHT_EMOTION
+    ACOUSTIC_WEIGHT = WEIGHT_ACOUSTIC
+    LINGUISTIC_WEIGHT = WEIGHT_LINGUISTIC
+
+    # =========================================================
+    # EMOTION → DISTRESS MAPPING
+    # =========================================================
+
+    EMOTION_DISTRESS_WEIGHTS = {
+        "SAD": 0.75,
+        "SADNESS": 0.75,
+
+        "FEAR": 0.90,
+        "FEARFUL": 0.90,
+
+        "ANGRY": 0.65,
+        "ANGER": 0.65,
+
+        "DISGUST": 0.50,
+
+        "SURPRISED": 0.30,
+        "SURPRISE": 0.30,
+
+        "NEUTRAL": 0.05,
+
+        "HAPPY": 0.05,
+        "HAPPINESS": 0.05,
+
+        "CALM": 0.05,
+    }
+
+    # =========================================================
+    # LINGUISTIC KEYWORDS
+    # =========================================================
+
+    # Ordinary distress indicators.
+    # These increase SVI but do NOT automatically make the
+    # assessment CRITICAL.
+    DISTRESS_KEYWORDS = {
+        "depressed": 0.45,
+        "help": 0.20,
+        "pain": 0.25,
+        "alone": 0.20,
+        "hopeless": 0.60,
+        "hurt": 0.35,
+        "harm": 0.45,
+        "bleeding": 0.60,
+        "die": 0.70,
+    }
+
+    # High-risk safety indicators.
+    # These trigger the safety override.
+    CRITICAL_KEYWORDS = {
+        "suicide": 1.00,
+        "suicidal": 1.00,
+        "kill myself": 1.00,
+        "kill me": 1.00,
+        "end my life": 1.00,
+        "end it all": 0.95,
+        "overdose": 0.95,
+        "self harm": 0.90,
+        "self-harm": 0.90,
+    }
 
     def __init__(self):
-
         print("[INFO] Initializing SVI Multimodal Engine...")
 
-        # ---------------------------------------------------------
-        # AUDIO PROCESSOR
-        # ---------------------------------------------------------
+        # -----------------------------------------------------
+        # Audio Preprocessing
+        # -----------------------------------------------------
 
         self.audio_processor = AudioProcessor()
 
-        # ---------------------------------------------------------
-        # SPEECH EMOTION MODEL
-        # ---------------------------------------------------------
+        # -----------------------------------------------------
+        # Speech Emotion Recognition
+        # -----------------------------------------------------
 
-        print(
-            "[INFO] Loading Wav2Vec 2.0 Speech Emotion Transformer..."
+        print("[INFO] Loading Wav2Vec 2.0 Speech Emotion Transformer...")
+
+        self.speech_classifier = pipeline(
+            "audio-classification",
+            model="ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
+        )
+        self.emotion_class_count = len(
+            getattr(self.speech_classifier.model.config, "id2label", {})
         )
 
-        self.speech_classifier = self._load_emotion_model()
-
-        # ---------------------------------------------------------
-        # WHISPER STT
-        # ---------------------------------------------------------
+        # -----------------------------------------------------
+        # Faster-Whisper Speech-to-Text
+        # -----------------------------------------------------
 
         print("[INFO] Loading Faster-Whisper STT Engine...")
 
         self.whisper_model = WhisperModel(
             "tiny",
             device="cpu",
-            compute_type="int8",
+            compute_type="int8"
         )
 
-        # ---------------------------------------------------------
-        # LEXICAL INDICATORS
-        # ---------------------------------------------------------
+    # =========================================================
+    # EMOTION SCORE
+    # =========================================================
 
-        # These are indicators only.
-        # They must NOT automatically force CRITICAL risk.
-        self.risk_keywords = [
-            "suicide",
-            "kill",
-            "die",
-            "depressed",
-            "help",
-            "pain",
-            "end it",
-            "hopeless",
-            "harm",
-            "bleeding",
-            "overdose",
-            "alone",
-        ]
+    def _calculate_emotion_distress(self, predictions):
+        """
+        Convert the complete emotion probability distribution
+        into a normalized distress score between 0 and 1.
 
-        # Higher-severity lexical indicators receive more weight.
-        self.keyword_weights = {
-            "suicide": 1.00,
-            "kill": 0.90,
-            "overdose": 0.90,
-            "harm": 0.70,
-            "bleeding": 0.60,
-            "end it": 0.80,
-            "hopeless": 0.60,
-            "depressed": 0.45,
-            "pain": 0.30,
-            "alone": 0.25,
-            "help": 0.15,
-            "die": 0.60,
-        }
+        Example:
 
-    # =============================================================
-    # MODEL LOADING
-    # =============================================================
+            fear     0.70
+            neutral  0.20
+            sad      0.10
 
-    def _load_emotion_model(self):
+        becomes approximately:
 
-        print("[INFO] Loading legacy Wav2Vec2 checkpoint...")
+            0.70*0.90 + 0.20*0.05 + 0.10*0.75
 
-        config = Wav2Vec2Config.from_pretrained(
-            MODEL_ID
-        )
-
-        feature_extractor = (
-            Wav2Vec2FeatureExtractor.from_pretrained(
-                MODEL_ID
-            )
-        )
-
-        model = LegacyEmotionClassifier(config)
-
-        checkpoint_path = hf_hub_download(
-            repo_id=MODEL_ID,
-            filename="model.safetensors",
-        )
-
-        checkpoint = load_file(checkpoint_path)
-
-        remapped = {}
-
-        for key, value in checkpoint.items():
-
-            new_key = key
-
-            if key.endswith(
-                "wav2vec2.encoder.pos_conv_embed.conv.weight_g"
-            ):
-                new_key = (
-                    "wav2vec2.encoder.pos_conv_embed.conv."
-                    "parametrizations.weight.original0"
-                )
-
-            elif key.endswith(
-                "wav2vec2.encoder.pos_conv_embed.conv.weight_v"
-            ):
-                new_key = (
-                    "wav2vec2.encoder.pos_conv_embed.conv."
-                    "parametrizations.weight.original1"
-                )
-
-            remapped[new_key] = value
-
-        missing, unexpected = model.load_state_dict(
-            remapped,
-            strict=False,
-        )
-
-        print("[INFO] Emotion checkpoint loaded.")
-
-        if missing:
-
-            print("[WARNING] Missing checkpoint weights:")
-
-            for key in missing:
-                print(f"  - {key}")
-
-        if unexpected:
-
-            print("[WARNING] Unexpected checkpoint weights:")
-
-            for key in unexpected:
-                print(f"  - {key}")
-
-        if not missing and not unexpected:
-
-            print(
-                "[INFO] All emotion-model checkpoint weights matched."
-            )
-
-        model.eval()
-
-        self.emotion_feature_extractor = feature_extractor
-
-        return model
-
-    # =============================================================
-    # EMOTION CLASSIFICATION
-    # =============================================================
-
-    def _classify_emotion(self, file_path):
-
-        import librosa
-
-        audio, sample_rate = librosa.load(
-            file_path,
-            sr=16000,
-            mono=True,
-        )
-
-        inputs = self.emotion_feature_extractor(
-            audio,
-            sampling_rate=sample_rate,
-            return_tensors="pt",
-        )
-
-        with torch.no_grad():
-
-            logits = self.speech_classifier(
-                input_values=inputs.input_values,
-                attention_mask=(
-                    inputs.attention_mask
-                    if hasattr(inputs, "attention_mask")
-                    else None
-                ),
-            )
-
-            probabilities = torch.softmax(
-                logits,
-                dim=-1,
-            )
-
-        scores = probabilities[0]
-
-        labels = [
-            "angry",
-            "calm",
-            "disgust",
-            "fearful",
-            "happy",
-            "neutral",
-            "sad",
-            "surprised",
-        ]
-
-        predictions = [
-            {
-                "label": labels[i],
-                "score": float(scores[i]),
-            }
-            for i in range(len(labels))
-        ]
-
-        predictions.sort(
-            key=lambda item: item["score"],
-            reverse=True,
-        )
-
-        return predictions
-
-    # =============================================================
-    # EMOTION STRESS SCORE
-    # =============================================================
-
-    @staticmethod
-    def _emotion_stress_score(predictions):
-
-        stress_weights = {
-            "angry": 0.65,
-            "calm": 0.05,
-            "disgust": 0.50,
-            "fearful": 0.90,
-            "happy": 0.05,
-            "neutral": 0.20,
-            "sad": 0.75,
-            "surprised": 0.40,
-        }
+        rather than simply treating the top emotion confidence
+        as a stress percentage.
+        """
 
         score = 0.0
 
         for prediction in predictions:
+            label = prediction["label"].strip().upper()
+            probability = float(prediction["score"])
 
-            label = prediction["label"].lower()
-            probability = prediction["score"]
-
-            weight = stress_weights.get(
+            distress_weight = self.EMOTION_DISTRESS_WEIGHTS.get(
                 label,
-                0.20,
+                0.10
             )
 
-            score += probability * weight
+            score += probability * distress_weight
 
-        return float(np.clip(score, 0.0, 1.0))
+        return float(
+            np.clip(score, 0.0, 1.0)
+        )
 
-    # =============================================================
-    # ACOUSTIC STRESS SCORE
-    # =============================================================
+    # =========================================================
+    # ACOUSTIC SCORE
+    # =========================================================
 
-    @staticmethod
-    def _acoustic_stress_score(acoustic_raw):
+    def _calculate_acoustic_stress(self, acoustic_raw):
+        """
+        Convert acoustic features into a normalized 0-1 score.
 
-        # Step 1 pitch volatility is now measured in
-        # semitone standard deviation.
-        #
-        # These are deliberately conservative normalization
-        # ranges. They are NOT clinical thresholds.
+        Pitch volatility is the strongest acoustic component.
+
+        RMS energy is deliberately given less importance because
+        microphone distance and recording volume can dramatically
+        change absolute RMS values.
+        """
+
+        pitch_volatility = float(
+            getattr(acoustic_raw, "pitch_std", 0.0) or 0.0
+        )
+
+        rms_energy = float(
+            getattr(acoustic_raw, "energy_rms", 0.0) or 0.0
+        )
+
+        # -----------------------------------------------------
+        # Pitch volatility
+        # -----------------------------------------------------
+
+        # Pitch volatility is already expressed in semitones relative to the
+        # speaker's median F0 by AudioProcessor.
         pitch_component = np.clip(
-            acoustic_raw.pitch_std / 2.0,
+            pitch_volatility / PITCH_VOLATILITY_NORMALIZATION,
             0.0,
-            1.0,
+            1.0
         )
 
-        # RMS is normalized relative to a practical speech range.
+        # -----------------------------------------------------
+        # RMS energy
+        # -----------------------------------------------------
+
+        # Keep this contribution deliberately small.
         energy_component = np.clip(
-            acoustic_raw.energy_rms / 0.10,
+            rms_energy / RMS_NORMALIZATION,
             0.0,
-            1.0,
+            1.0
         )
 
-        # Energy variation is also incorporated when available.
-        energy_variation_component = np.clip(
-            acoustic_raw.energy_variation / 12.0,
-            0.0,
-            1.0,
-        )
+        # -----------------------------------------------------
+        # Final acoustic score
+        # -----------------------------------------------------
 
         acoustic_score = (
-            0.50 * pitch_component
-            + 0.30 * energy_component
-            + 0.20 * energy_variation_component
+            ACOUSTIC_PITCH_WEIGHT * pitch_component
+            + ACOUSTIC_RMS_WEIGHT * energy_component
         )
 
         return float(
             np.clip(
                 acoustic_score,
                 0.0,
-                1.0,
+                1.0
             )
         )
 
-    # =============================================================
-    # LEXICAL STRESS SCORE
-    # =============================================================
+    # =========================================================
+    # KEYWORD MATCHING
+    # =========================================================
 
-    def _lexical_analysis(self, transcript):
+    @staticmethod
+    def _is_negated_or_contextual_reference(text, match, keyword):
+        """Reject transparent negations and prevention/discussion references.
 
-        text = transcript.lower()
+        This is intentionally limited rule-based protection, not clinical NLP.
+        """
+        sentence_start = max(
+            text.rfind(".", 0, match.start()),
+            text.rfind("!", 0, match.start()),
+            text.rfind("?", 0, match.start()),
+            text.rfind("\n", 0, match.start()),
+        ) + 1
+        sentence_end_candidates = [
+            position for position in (
+                text.find(".", match.end()),
+                text.find("!", match.end()),
+                text.find("?", match.end()),
+                text.find("\n", match.end()),
+            ) if position != -1
+        ]
+        sentence_end = min(sentence_end_candidates) if sentence_end_candidates else len(text)
+        sentence = text[sentence_start:sentence_end]
+        escaped_keyword = re.escape(keyword)
 
-        matched_triggers = []
-        weighted_scores = []
+        negation_patterns = (
+            rf"\b(?:not|never|without)\b(?:\W+\w+){{0,4}}\W+{escaped_keyword}\b",
+            rf"\b(?:do not|don't|does not|doesn't|did not|didn't)\b"
+            rf"(?:\W+\w+){{0,5}}\W+{escaped_keyword}\b",
+        )
+        if any(re.search(pattern, sentence) for pattern in negation_patterns):
+            return True
 
-        for keyword in self.risk_keywords:
+        is_prevention_reference = re.search(
+            r"\b(?:suicide|suicidal|self[-\s]harm)\s+"
+            r"(?:prevention|awareness|education)\b",
+            sentence,
+        )
+        is_discussion = re.search(
+            r"\b(?:discuss(?:ed|ing)?|talk(?:ed|ing)?\s+about|"
+            r"learn(?:ed|ing)?\s+about)\b",
+            sentence,
+        )
+        return bool(is_prevention_reference and is_discussion)
 
-            # Word-boundary matching for single words.
-            # Prevents things like "helpful" matching "help".
+    def _find_keyword_matches(self, transcript):
+        """
+        Find distress and critical keywords using word-aware
+        matching rather than simple substring matching.
 
-            if " " not in keyword:
+        This prevents cases such as:
 
-                pattern = rf"\b{re.escape(keyword)}\b"
+            "skilled"
 
-            else:
+        accidentally matching:
 
-                pattern = rf"\b{re.escape(keyword)}\b"
+            "kill"
+        """
+
+        text = (transcript or "").lower()
+
+        distress_matches = []
+        critical_matches = []
+
+        # -----------------------------------------------------
+        # Ordinary distress keywords
+        # -----------------------------------------------------
+
+        for keyword, weight in self.DISTRESS_KEYWORDS.items():
+
+            pattern = rf"\b{re.escape(keyword)}\b"
 
             if re.search(pattern, text):
-
-                matched_triggers.append(keyword)
-
-                weighted_scores.append(
-                    self.keyword_weights.get(
-                        keyword,
-                        0.20,
-                    )
+                distress_matches.append(
+                    (keyword, weight)
                 )
+
+        # -----------------------------------------------------
+        # Critical phrases
+        # -----------------------------------------------------
+
+        for keyword, weight in self.CRITICAL_KEYWORDS.items():
+
+            # Phrases such as "kill myself" need normal
+            # whitespace matching.
+            pattern = rf"\b{re.escape(keyword)}\b"
+
+            for match in re.finditer(pattern, text):
+                if not self._is_negated_or_contextual_reference(
+                    text, match, keyword
+                ):
+                    critical_matches.append((keyword, weight))
+                    break
+
+        return distress_matches, critical_matches
+
+    # =========================================================
+    # LINGUISTIC SCORE
+    # =========================================================
+
+    def _calculate_linguistic_score(
+        self,
+        transcript,
+        distress_matches,
+        critical_matches
+    ):
+        """
+        Convert linguistic indicators into a normalized 0-1 score.
+
+        Critical phrases receive a very high score.
+
+        Ordinary distress keywords contribute according to:
+            - keyword severity
+            - number of distinct indicators
+            - transcript length
+        """
+
+        text = (transcript or "").strip()
+
+        if not text:
+            return 0.0
 
         word_count = max(
             len(text.split()),
-            1,
+            1
         )
 
-        # Keep lexical contribution bounded.
-        #
-        # Repetition should increase the score gradually,
-        # not instantly produce CRITICAL.
-        lexical_strength = (
-            sum(weighted_scores)
-            / np.sqrt(word_count)
+        # -----------------------------------------------------
+        # Critical indicators
+        # -----------------------------------------------------
+
+        if critical_matches:
+
+            strongest_critical = max(
+                weight
+                for _, weight in critical_matches
+            )
+
+            # Critical language should strongly influence SVI.
+            # The safety override is handled separately.
+            critical_score = (
+                0.80
+                + 0.20 * strongest_critical
+            )
+
+            return float(
+                np.clip(
+                    critical_score,
+                    0.0,
+                    1.0
+                )
+            )
+
+        # -----------------------------------------------------
+        # Ordinary distress indicators
+        # -----------------------------------------------------
+
+        if not distress_matches:
+            return 0.0
+
+        weighted_sum = sum(
+            weight
+            for _, weight in distress_matches
         )
 
-        lexical_score = float(
+        # More indicators increase severity, but the score is
+        # bounded so that a long transcript does not automatically
+        # become critical.
+        indicator_component = np.clip(
+            weighted_sum / 1.5,
+            0.0,
+            1.0
+        )
+
+        # Short statements containing distress language deserve
+        # slightly more weight than very long transcripts.
+        length_factor = np.clip(
+            20.0 / word_count,
+            0.35,
+            1.0
+        )
+
+        lexical_score = (
+            0.75 * indicator_component
+            + 0.25 * length_factor
+        )
+
+        return float(
             np.clip(
-                lexical_strength,
+                lexical_score,
                 0.0,
-                1.0,
+                1.0
             )
         )
 
-        return (
-            matched_triggers,
-            lexical_score,
-        )
-
-    # =============================================================
+    # =========================================================
     # RISK BAND
-    # =============================================================
+    # =========================================================
 
-    @staticmethod
-    def _get_risk_band(svi_score):
+    def _determine_risk_band(self, svi_score, override_triggered):
+        """
+        Determine risk level.
 
-        # Use config.py as the single source of thresholds.
+        Critical safety language overrides the numerical SVI.
+        """
 
-        if svi_score >= RISK_RULES["CRITICAL"]["min_score"]:
-            return "CRITICAL"
+        if override_triggered or svi_score >= RISK_RULES["CRITICAL"]["min_score"]:
+            return (
+                "CRITICAL",
+                RISK_RULES["CRITICAL"]["color"],
+                "HIGH",
+                [
+                    "IMMEDIATE_HUMAN_DISPATCH",
+                    "ALERT_SAFETY_TEAM"
+                ]
+            )
 
-        if svi_score >= RISK_RULES["HIGH"]["min_score"]:
-            return "HIGH"
+        elif svi_score >= RISK_RULES["HIGH"]["min_score"]:
+            return (
+                "HIGH",
+                RISK_RULES["HIGH"]["color"],
+                "HIGH",
+                [
+                    "ESCALATE_TO_SENIOR_SUPERVISOR",
+                    "PRIORITIZE_COUNSELOR_FOLLOWUP"
+                ]
+            )
 
-        if svi_score >= RISK_RULES["MODERATE"]["min_score"]:
-            return "MODERATE"
+        elif svi_score >= RISK_RULES["MODERATE"]["min_score"]:
+            return (
+                "MODERATE",
+                RISK_RULES["MODERATE"]["color"],
+                "MEDIUM",
+                [
+                    "OPERATOR_MONITORING",
+                    "COUNSELOR_FOLLOWUP"
+                ]
+            )
 
-        return "LOW"
+        else:
+            return (
+                "LOW",
+                RISK_RULES["LOW"]["color"],
+                "LOW",
+                [
+                    "ROUTINE_LOGGING"
+                ]
+            )
 
-    # =============================================================
-    # MAIN MULTIMODAL PIPELINE
-    # =============================================================
+    # =========================================================
+    # MAIN MULTIMODAL PROCESSING
+    # =========================================================
 
     def process_multimodal_audio(
         self,
         file_path: str,
-        filename: str,
-        language: str = "English",
+        filename: str
     ) -> AudioAnalysisResponse:
 
-        # ---------------------------------------------------------
-        # 1. ACOUSTIC FEATURES
-        # ---------------------------------------------------------
+        """
+        Complete multimodal assessment pipeline:
+
+            Audio
+              ↓
+            Acoustic features
+              ↓
+            Wav2Vec2 emotion
+              ↓
+            Whisper transcript
+              ↓
+            Linguistic analysis
+              ↓
+            Multimodal SVI
+              ↓
+            Risk band
+        """
+
+        # =====================================================
+        # 1. ACOUSTIC SIGNAL PROCESSING
+        # =====================================================
 
         acoustic_raw = (
-            self.audio_processor.extract_acoustic_features(
-                file_path
+            self.audio_processor
+            .extract_acoustic_features(file_path)
+        )
+
+        # =====================================================
+        # 2. SPEECH EMOTION RECOGNITION
+        # =====================================================
+
+        emotion_predictions = self.speech_classifier(
+            file_path,
+            top_k=self.emotion_class_count or None,
+        )
+
+        if not emotion_predictions:
+            emotion_predictions = [
+                {
+                    "label": "NEUTRAL",
+                    "score": 1.0
+                }
+            ]
+
+        print("\n[EMOTION DEBUG]")
+        for prediction in emotion_predictions:
+            print(
+                f"  {prediction['label'].upper():12} "
+                f": {float(prediction['score']) * 100:.2f}%"
             )
-        )
-
-        # ---------------------------------------------------------
-        # 2. SPEECH EMOTION
-        # ---------------------------------------------------------
-
-        emotion_predictions = (
-            self._classify_emotion(file_path)
-        )
 
         top_emotion = (
-            emotion_predictions[0]["label"].upper()
+            emotion_predictions[0]["label"]
+            .strip()
+            .upper()
         )
 
-        emotion_confidence = (
-            emotion_predictions[0]["score"] * 100
-        )
+        # This is model confidence, NOT stress.
+        emotion_confidence = float(
+            emotion_predictions[0]["score"]
+        ) * 100.0
 
-        emotion_stress = (
-            self._emotion_stress_score(
+        emotion_distress = (
+            self._calculate_emotion_distress(
                 emotion_predictions
             )
         )
 
-        # ---------------------------------------------------------
-        # 3. SPEECH TO TEXT
-        # ---------------------------------------------------------
-
-        language_map = {
-            "English": "en",
-            "Hindi": "hi",
-            "Telugu": "te",
-            "Marathi": "mr",
-            "Bengali": "bn",
-            "Tamil": "ta",
-            "Kannada": "kn",
-        }
-
-        whisper_language = language_map.get(
-            language
-        )
+        # =====================================================
+        # 3. WHISPER SPEECH-TO-TEXT
+        # =====================================================
 
         segments, info = self.whisper_model.transcribe(
             file_path,
-            beam_size=5,
-            language=whisper_language,
+            beam_size=5
         )
 
         transcript = " ".join(
@@ -559,137 +598,147 @@ class SVIEngine:
             else 0.0
         )
 
-        # ---------------------------------------------------------
-        # 4. LEXICAL ANALYSIS
-        # ---------------------------------------------------------
+        # =====================================================
+        # 4. LINGUISTIC ANALYSIS
+        # =====================================================
 
-        (
-            matched_triggers,
-            lexical_score,
-        ) = self._lexical_analysis(
-            transcript
+        distress_matches, critical_matches = (
+            self._find_keyword_matches(
+                transcript
+            )
         )
 
-        # ---------------------------------------------------------
-        # 5. ACOUSTIC SCORE
-        # ---------------------------------------------------------
+        linguistic_score = (
+            self._calculate_linguistic_score(
+                transcript,
+                distress_matches,
+                critical_matches
+            )
+        )
 
-        acoustic_score = (
-            self._acoustic_stress_score(
+        # All keywords shown to frontend.
+        matched_triggers = [
+            keyword
+            for keyword, _ in distress_matches
+        ] + [
+            keyword
+            for keyword, _ in critical_matches
+        ]
+
+        # Remove duplicates while preserving order.
+        matched_triggers = list(
+            dict.fromkeys(matched_triggers)
+        )
+
+        # =====================================================
+        # 5. ACOUSTIC DISTRESS SCORE
+        # =====================================================
+
+        acoustic_stress = (
+            self._calculate_acoustic_stress(
                 acoustic_raw
             )
         )
 
-        # ---------------------------------------------------------
+        # =====================================================
         # 6. MULTIMODAL SVI
-        # ---------------------------------------------------------
+        # =====================================================
 
-        #
-        # ML emotion + acoustic DSP are the primary components.
-        #
-        # Lexical indicators provide an additional bounded signal.
-        #
         # IMPORTANT:
-        # A keyword alone can no longer force CRITICAL.
         #
-
-        primary_score = (
-            WEIGHT_ML_EMOTION * emotion_stress
-            + WEIGHT_ACOUSTIC * acoustic_score
-        )
-
-        lexical_contribution = (
-            0.20 * lexical_score
-        )
+        # Emotion       = 45%
+        # Acoustic      = 30%
+        # Linguistic    = 25%
+        #
+        # The weights sum to exactly 1.0.
 
         raw_svi = (
-            0.80 * primary_score
-            + lexical_contribution
+            self.EMOTION_WEIGHT * emotion_distress
+            + self.ACOUSTIC_WEIGHT * acoustic_stress
+            + self.LINGUISTIC_WEIGHT * linguistic_score
         )
 
         svi_score = round(
             float(
                 np.clip(
-                    raw_svi * 100,
-                    0,
-                    100,
+                    raw_svi * 100.0,
+                    0.0,
+                    100.0
                 )
             ),
-            2,
+            2
         )
 
-        # ---------------------------------------------------------
-        # 7. RISK BAND
-        # ---------------------------------------------------------
+        # =====================================================
+        # 7. SAFETY OVERRIDE
+        # =====================================================
 
-        risk_band = self._get_risk_band(
-            svi_score
+        override_triggered = (
+            len(critical_matches) > 0
         )
 
-        risk_rule = RISK_RULES[risk_band]
+        if override_triggered:
 
-        risk_color = risk_rule["color"]
+            override_reason = (
+                "High-risk safety language detected "
+                "in transcript"
+            )
 
-        # Keep threat_level compatible with current frontend.
-        threat_level_map = {
-            "LOW": "LOW",
-            "MODERATE": "MEDIUM",
-            "HIGH": "HIGH",
-            "CRITICAL": "HIGH",
-        }
+        else:
 
-        threat_level = threat_level_map[
-            risk_band
-        ]
+            override_reason = None
 
-        # Existing intervention schema preserved.
-        interventions = risk_rule["actions"]
+        # =====================================================
+        # 8. RISK BANDING
+        # =====================================================
 
-        # ---------------------------------------------------------
-        # 8. OVERRIDE INFORMATION
-        # ---------------------------------------------------------
+        (
+            risk_band,
+            risk_color,
+            threat_level,
+            interventions
+        ) = self._determine_risk_band(
+            svi_score,
+            override_triggered
+        )
 
-        # No automatic keyword emergency override.
-        #
-        # This field remains in the API for frontend compatibility.
-
-        override_triggered = False
-
-        override_reason = None
-
-        # ---------------------------------------------------------
+        # =====================================================
         # 9. EXPLAINABILITY
-        # ---------------------------------------------------------
+        # =====================================================
 
-        top_contributors = []
-
-        if emotion_stress >= 0.50:
-
+        emotion_contribution = self.EMOTION_WEIGHT * emotion_distress * 100.0
+        acoustic_contribution = self.ACOUSTIC_WEIGHT * acoustic_stress * 100.0
+        linguistic_contribution = self.LINGUISTIC_WEIGHT * linguistic_score * 100.0
+        top_contributors = [
+            f"Emotion distress contribution: {emotion_contribution:.1f} SVI points ({top_emotion})",
+            f"Acoustic contribution: {acoustic_contribution:.1f} SVI points",
+            f"Linguistic contribution: {linguistic_contribution:.1f} SVI points",
+        ]
+        if override_triggered:
             top_contributors.append(
-                f"Speech emotion signal: {top_emotion}"
+                "Safety override: explicit high-risk self-harm language detected"
             )
 
-        if acoustic_score >= 0.50:
+        # =====================================================
+        # 10. DEBUG OUTPUT
+        # =====================================================
 
-            top_contributors.append(
-                "Elevated acoustic variability"
-            )
+        print(
+            "\n"
+            "[SVI DEBUG]\n"
+            f"  Top emotion          : {top_emotion}\n"
+            f"  Emotion confidence   : {emotion_confidence:.2f}%\n"
+            f"  Emotion distress     : {emotion_distress:.3f}\n"
+            f"  Acoustic score       : {acoustic_stress:.3f}\n"
+            f"  Linguistic score     : {linguistic_score:.3f}\n"
+            f"  Critical override    : {override_triggered}\n"
+            f"  Final SVI            : {svi_score:.2f}\n"
+            f"  Risk band            : {risk_band}\n"
+        )
 
-        if lexical_score >= 0.20:
-
-            top_contributors.append(
-                "Distress-related lexical indicators detected"
-            )
-
-        if not top_contributors:
-
-            top_contributors.append(
-                "No dominant elevated signal detected"
-            )
-
-        # ---------------------------------------------------------
-        # 10. RESPONSE
-        # ---------------------------------------------------------
+        # =====================================================
+        # 11. API RESPONSE
+        # =====================================================
 
         return AudioAnalysisResponse(
 
@@ -699,7 +748,7 @@ class SVIEngine:
 
             duration_seconds=round(
                 duration,
-                2,
+                2
             ),
 
             transcript=(
@@ -713,29 +762,30 @@ class SVIEngine:
                 top_emotion=top_emotion,
 
                 pitch_volatility=round(
-                    float(
-                        acoustic_raw.pitch_std
-                    ),
-                    2,
+                    float(acoustic_raw.pitch_std),
+                    2
                 ),
 
                 rms_energy=round(
-                    float(
-                        acoustic_raw.energy_rms
-                    ),
-                    4,
+                    float(acoustic_raw.energy_rms),
+                    4
                 ),
 
+                # This remains emotion MODEL CONFIDENCE,
+                # not SVI or stress percentage.
                 confidence=round(
                     emotion_confidence,
-                    1,
-                ),
+                    1
+                )
             ),
 
             nlp_indicators=NLPIndicators(
-                speech_emotion=top_emotion,
-              threat_level=threat_level,
-              flagged_keywords=matched_triggers,
+
+                detected_emotion=top_emotion,
+
+                threat_level=threat_level,
+
+                flagged_keywords=matched_triggers
             ),
 
             svi_metrics=SVIMetrics(
@@ -748,19 +798,18 @@ class SVIEngine:
 
                 override_triggered=override_triggered,
 
-                override_reason=override_reason,
+                override_reason=override_reason
             ),
 
             explainability=Explainability(
 
                 summary=(
-                    f"Analysis yielded a "
-                    f"{risk_band} risk profile "
-                    f"with SVI score {svi_score}."
+                    f"Multimodal screening yielded a {risk_band} risk profile "
+                    f"with SVI score {svi_score}; this is not a clinical diagnosis."
                 ),
 
-                top_contributors=top_contributors,
+                top_contributors=top_contributors
             ),
 
-            recommended_interventions=interventions,
+            recommended_interventions=interventions
         )
