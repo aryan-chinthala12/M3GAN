@@ -1,3 +1,14 @@
+# Logs
+*.log
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Cache and local tooling directories
+.freebuff/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

@@ -1,139 +1,199 @@
-# M3GAN 🎙️
+# M3GAN — AI Stress & Trauma Assessment Module for NHAA (14566) 🎙️
 
-AI-powered real-time multimodal stress and trauma assessment engine.
+AI-powered real-time multimodal stress and trauma assessment engine for the
+**National Helpline Against Atrocities (NHAA — 14566)**, Department of Social
+Justice & Empowerment, Government of India.
 
-**M3GAN** is a production-grade multimodal processing engine designed for real-time distress detection and automated emotional triage on emergency support helplines, including integration pathways for the **National Helpline Against Atrocities (NHAA - 14566)** under the **Department of Social Justice and Empowerment (DoSJE)**, Government of India.
-
-The system extracts real-time vocal biomarkers—pitch volatility and volume energy—and fuses them with Speech Emotion Recognition (SER) and Speech-to-Text (STT) lexical threat detection to compute a dynamic **Stress Vulnerability Index (SVI)** (`0–100`) and trigger emergency response routing.
-
----
-
-## 📌 Problem Statement & Context
-
-Victims of atrocities and severe distress contacting emergency helplines often suffer from hyperventilation, emotional shock, or acute trauma. Traditional manual triage or text-only chatbots introduce critical delays during high-priority emergency windows.
-
-**M3GAN** solves this by delivering **instant multimodal triage** at both the acoustic signal level (*how a voice sounds*) and the lexical content level (*what is spoken*). This allows helpline operators and emergency responders to immediately identify high-risk callers, bypass manual routing, and prioritize life-saving intervention.
+The system assesses psychological stress, trauma, fear, anxiety and
+vulnerability of victims/complainants across **every NHAA digital channel** —
+voice calls, the Integrated Portal, chatbot, IVRS transcripts and any approved
+digital interface — and produces a **Stress Vulnerability Index (SVI 0–100)**
+with Low / Moderate / High / Critical risk triage and automated intervention
+recommendations.
 
 ---
 
-## ⚡ Core Capabilities
+## ⚡ What it does
 
-* **Multimodal Data Fusion:** Fuses Wav2Vec 2.0 Speech Emotion Recognition (SER) with Faster-Whisper Speech-to-Text (STT) transcription.
-* **Acoustic Biomarker Signal Processing:** Uses `librosa` to analyze signal energy (RMS) and fundamental pitch variance (`pitch_std`) to detect voice strain and tremors.
-* **Lexical Threat Override:** Automatically escalates callers to **CRITICAL** risk when active distress keywords (*suicide*, *overdose*, *harm*, *pain*) are detected in transcripts.
-* **Stress Vulnerability Index (SVI):** A mathematical scoring model mapping acoustic strain, emotional weights, and lexical risk to a normalized `0–100` scale.
-* **Automated Risk Categorization:** Assigns callers into **LOW**, **MODERATE**, and **CRITICAL** risk tiers accompanied by UI color indicators (`#D32F2F` for Critical).
-* **Actionable Protocol Triggers:** Dynamically generates recommended routing actions ranging from standard logging to `IMMEDIATE_HUMAN_DISPATCH`.
-* **Microservice Architecture:** Modular FastAPI backend connected to an interactive Streamlit agent dashboard.
+| Requirement (Problem Statement) | Implementation |
+| :--- | :--- |
+| Analyse voice, speech patterns, pauses, pitch variation | `librosa` DSP: semitone pitch volatility, RMS energy, energy variation, median F0 (`audio_processor.py`) |
+| NLP / Emotion AI on the narrative | Wav2Vec 2.0 speech-emotion SER + weighted multilingual distress lexicon (11 categories) |
+| Multilingual (major Indian languages + dialects) | Whisper STT (en/hi/bn/ta/te/mr/kn) + lexicon in 7 languages **plus Romanized / code-mixed speech**, with script-aware matching for Indic Unicode |
+| Stress Vulnerability Index on a predefined scale | SVI 0–100 with explainable per-component contributions |
+| Low / Moderate / High / Critical categories | Threshold bands at 25 / 50 / 75 with protocol actions per band |
+| Detect severe trauma, suicidal ideation, intimidation, isolation | Severity-weighted categories incl. Suicidal Ideation, Self-Harm, Sexual Violence, Violence/Death Threats, Fear/Intimidation, Social Boycott/Isolation, Grief, Caste-Atrocity context |
+| Automatic recommendations (counselling, legal aid, police, protection) | Per-band intervention routing in `config.py` (senior counsellor, district police desk, PFA, legal-aid officer, 24-h welfare check) |
+| Privacy, informed consent, confidentiality, ethical AI | **PII redaction before storage** (phones, Aadhaar, email, self-disclosed names), mandatory informed-consent gate in the UI, human-oversight banner, human-in-the-loop escalation endpoint |
+
+### Grounded severity floors (ethical safeguard)
+
+A genuine high-severity disclosure keeps the SVI grounded even when the caller
+speaks softly or briefly — e.g. suicidal ideation can never score below **78**.
+Floors are *floors, not overrides*: no keyword can fabricate a CRITICAL score,
+and every application of a floor is shown to the human reviewer with reasons.
+
+### Explainability
+
+Every assessment returns per-component scores, weights and contributions
+(`svi_metrics.components`), flagged multilingual terms, distress categories,
+and a plain-language summary — the dashboard renders all of it.
 
 ---
 
-## 🏗️ Architecture & Processing Pipeline
+## 🏗️ Architecture
 
 ```text
-                     [ Incoming Audio File (.wav / .mp3) ]
-                                       │
-                                       ▼
-                       ┌───────────────┴───────────────┐
-                       │   Audio Processing Engine     │
-                       └───────────────┬───────────────┘
-                                       │
-            ┌──────────────────────────┼──────────────────────────┐
-            ▼                          ▼                          ▼
-  ┌───────────────────┐      ┌───────────────────┐      ┌───────────────────┐
-  │ Audio Processor   │      │ Wav2Vec 2.0 (SER) │      │  Faster-Whisper   │
-  │ Pitch Std / RMS   │      │ Emotion & Conf.   │      │  Transcription    │
-  └─────────┬─────────┘      └─────────┬─────────┘      └─────────┬─────────┘
-            │                          │                          │
-            │                          │                ┌─────────┴─────────┐
-            │                          │                │ Keyword Scanner   │
-            │                          │                │ Threat Keywords   │
-            │                          │                └─────────┬─────────┘
-            │                          │                          │
-            └──────────────────────────┼──────────────────────────┘
-                                       │
-                                       ▼
-                       ┌───────────────┴───────────────┐
-                       │       SVI Fusion Engine       │
-                       │   Score (0-100) + Overrides   │
-                       └───────────────┬───────────────┘
-                                       │
-                                       ▼
-                       ┌───────────────┴───────────────┐
-                       │ FastAPI Backend (/analyze)    │
-                       │ Returns AudioAnalysisResponse │
-                       └───────────────┬───────────────┘
-                                       │
-                                       ▼
-                       ┌───────────────┴───────────────┐
-                       │   Streamlit Agent Dashboard   │
-                       └───────────────────────────────┘
+   Voice call ──┐                          Chat / Portal / Chatbot / IVRS ──┐
+                ▼                                                          ▼
+   ┌─────────────────────────┐                            ┌──────────────────────────┐
+   │ Faster-Whisper STT      │                            │  PII Redaction           │
+   │ Wav2Vec2 Emotion (SER)  │                            │  (phone/Aadhaar/email/   │
+   │ librosa biomarkers      │                            │   self-disclosed names)  │
+   └───────────┬─────────────┘                            └────────────┬─────────────┘
+               │  transcript                                           │
+               ▼                                                       ▼
+   ┌───────────────────────────────────────────────────────────────────────────┐
+   │        Multilingual Distress Lexicon (backend/lexicon.py)                 │
+   │   en · hi (Devanagari+Roman) · bn · ta · te · mr · kn · code-mixed        │
+   │   11 weighted categories · longest-span matching · repetition saturation  │
+   └───────────────────────────────┬───────────────────────────────────────────┘
+                                   ▼
+                     ┌───────────────────────────┐
+                     │  SVI Fusion Engine        │
+                     │  expansion curves +       │
+                     │  severity floors → 0–100  │
+                     └─────────────┬─────────────┘
+                                   ▼
+              ┌────────────────────────────────────────┐
+              │ FastAPI : risk band · interventions ·  │
+              │ explainability · SQLite case store     │
+              └────────────────────┬───────────────────┘
+                                   ▼
+                     React operator dashboard (Vite + Tailwind)
+                     dashboard · case queue · live voice/text assessment
 ```
----
-
-## 🛠️ Tech Stack
-
-| Layer | Technology | Version / Details |
-| :--- | :--- | :--- |
-| **Backend** | FastAPI `0.110.0+` | Asynchronous REST API server & router |
-| **Audio Processing** | Librosa / SciPy `0.10.1+` | Pitch tracking (`piptrack`), RMS energy, DSP routines |
-| **ML Engine** | Wav2Vec 2.0 | `ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition` |
-| **STT Engine** | Faster-Whisper `1.0.0+` | CTranslate2-accelerated Speech-to-Text (`tiny` model) |
-| **Frontend** | Real-time agent monitoring interface nd something _____|
-| **Validation** | Pydantic v2 `2.6.0+` | Strict JSON schema definitions & request parsing |
 
 ---
 
-## 🚀 API Endpoints
+## 🚀 Run it
 
-The backend exposes REST endpoints at `http://127.0.0.1:8000`. Interactive documentation is available via `/docs`.
+### Backend (FastAPI, port 8000)
+
+```bash
+# first time: create venv + install
+python -m venv .venv
+.venv/Scripts/pip install -r requirements.txt      # Windows
+# .venv/bin/pip install -r requirements.txt        # Linux/Mac
+
+.venv/Scripts/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+- Swagger docs: `http://127.0.0.1:8000/docs`
+- The server starts instantly; SER + Whisper models download/load lazily on
+  the first audio request. **Text analysis works immediately, no downloads.**
+
+### Frontend (React dashboard, port 5173)
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`. The dashboard auto-detects the backend; if it
+is down it shows demo data with a banner instead of crashing.
+
+---
+
+## 📊 API Endpoints
 
 | Method | Path | Description |
 | :--- | :--- | :--- |
-| `POST` | `/api/v1/analyze-audio` | Primary multimodal analysis (`.wav`/`.mp3` upload → STT + SER + SVI) |
-| `POST` | `/api/v1/interventions/respond` | Record agent acknowledgment and log escalation response |
-| `GET` | `/health` | Health check (Engine status + model loading states) |
+| `POST` | `/api/v1/analyze-audio` | Voice call: STT + SER + acoustic biomarkers + lexicon → SVI. Form fields: `file`, `language`, `consent` |
+| `POST` | `/api/v1/analyze-text` | Chat/portal/chatbot narrative → SVI. JSON: `{text, channel, language}` |
+| `GET` | `/api/v1/cases` | Recent assessed cases (dashboard queue) |
+| `GET` | `/api/v1/cases/{id}` | Full case record incl. redacted narrative |
+| `GET` | `/api/v1/stats` | Aggregates: totals, risk/channel breakdown, avg SVI |
+| `POST` | `/api/v1/interventions/respond` | Human-in-the-loop: operator acknowledges/escalates a case |
+| `GET` | `/health` | Engine + model status |
 
-### Request & Response Details
+### Example
 
-* **`POST /api/v1/analyze-audio`**
-  * **Payload:** `multipart/form-data` with `file`
-  * **Response:** Returns `duration_seconds`, `transcript`, `acoustic_indicators`, `nlp_indicators`, `svi_metrics`, and `recommended_interventions`.
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/analyze-text \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Woh log mujhe dhamki de rahe hain, main bahut darr gayi hoon", "channel": "chat", "language": "Hindi"}'
+```
 
-* **`POST /api/v1/interventions/respond`**
-  * **Payload:** `{"call_id": "string", "operator_id": "string", "action_taken": "string", "notes": "string"}`
+Response (trimmed):
+
+```json
+{
+  "case_id": "NH-D5D496A8",
+  "svi_metrics": {
+    "final_svi_score": 75.94,
+    "risk_band": "CRITICAL",
+    "components": [{"name": "lexical", "score": 0.66, "weight": 1.0, "contribution": 75.94}]
+  },
+  "nlp_indicators": {
+    "flagged_keywords": ["koi madad nahi", "bahishkar", "dhamki", "akela", "darr"],
+    "distress_categories": ["Fear / intimidation / threats", "Social boycott / isolation / displacement"]
+  },
+  "recommended_interventions": ["Immediate Priority Transfer to Senior Trauma Counselor", "..."]
+}
+```
 
 ---
 
 ## 📊 SVI Scoring Model & Risk Bands
 
-The **Stress Vulnerability Index (SVI)** maps raw signal processing values, machine learning outputs, and keyword matches into a unified score scaled from `0` to `100`.
-
-| Score Range | Risk Band | Color Code | Protocol Trigger |
+| SVI | Band | Color | Protocol |
 | :--- | :--- | :--- | :--- |
-| `0 – 39` | **LOW** | `#2E7D32` (Green) | Routine logging, standard response queue |
-| `40 – 69` | **MODERATE** | `#ED6C02` (Orange) | Senior agent review, priority queue placement |
-| `70 – 100` | **CRITICAL** | `#D32F2F` (Red) | `IMMEDIATE_HUMAN_DISPATCH`, Safety Team alert |
+| 0–24 | **LOW** | 🟢 `#00C853` | Routine grievance intake and logging |
+| 25–49 | **MODERATE** | 🟡 `#FFD600` | Counselling intake queue + 24-h welfare check |
+| 50–74 | **HIGH** | 🟠 `#FF6D00` | Senior supervisor + Psychological First Aid + legal-aid officer |
+| 75–100 | **CRITICAL** | 🔴 `#D50000` | Senior trauma counsellor + district police desk alert + line-tracing |
 
-> **Note:** Any detection of critical lexical keywords (e.g., *suicide*, *harm*) triggers an immediate **CRITICAL** override regardless of acoustic scores.
+Fusion (voice): `SVI = 0.30·acoustic + 0.45·emotion + 0.25·lexical`, each component
+passed through a monotonic expansion curve, plus severity floors.
+
 ---
 
-## 📁 Project Directory Structure
+## 🗂️ Project Structure
 
 ```text
-M3GAN/
 ├── backend/
-│   ├── __init__.py           # Package initialization
-│   ├── config.py             # Feature weights, thresholds, and risk parameters
-│   ├── audio_processor.py    # Librosa signal processing and biomarker routines
-│   ├── schemas.py            # Pydantic schema definitions
-│   ├── svi_engine.py         # SVI scoring algorithms, SER, Whisper STT & threat rules
-│   └── main.py               # FastAPI router and server initialization
-├── frontend/
-│   └── xyz           
-├── scripts/
-│   └── train_model.py        # Offline dataset training & fine-tuning script
-├── sample_data/              # Sample audio files for testing
-├── requirements.txt          # Python dependency manifest
-├── .gitignore                # System and python cache exclusions
-└── README.md                 # System documentation
+│   ├── main.py               # FastAPI routes (audio, text, cases, stats, HITL)
+│   ├── svi_engine.py         # SVI fusion, SER, Whisper STT, persistence
+│   ├── text_analyzer.py      # Shared narrative analysis (both modalities)
+│   ├── lexicon.py            # Multilingual distress lexicon + PII redaction
+│   ├── audio_processor.py    # librosa biomarkers (pitch semitones, RMS, F0)
+│   ├── case_store.py         # SQLite case persistence (thread-safe)
+│   ├── config.py             # Weights, risk bands, intervention protocols
+│   ├── schemas.py            # Pydantic v2 API schemas
+│   └── tests/                # Text-pipeline regression checks
+├── frontend/                 # React 19 + Vite + Tailwind operator dashboard
+│   └── src/pages/            # Dashboard · Cases · CaseDetails · LiveAssessment (voice+text)
+├── sample_data/              # Multilingual test narratives + audio guidance
+├── data/cases.db             # SQLite case store (created at runtime)
+└── requirements.txt
+```
+
+---
+
+## ⚖️ Ethics & Responsible-AI notes
+
+- Assessments are **decision support for trained operators**, never an
+  automatic determination of risk or a clinical diagnosis (enforced in UI copy).
+- All narratives are PII-redacted **before** persistence; only redacted text
+  is stored or returned.
+- Informed consent is a mandatory, recorded step before any assessment runs.
+- Severity floors raise scores only for genuine disclosures and always show
+  their reasoning to the human reviewer.
+
+## 👥 Stakeholders served
+
+DoSJE · NHAA 14566 operators · State/UT governments · District
+administrations · Counsellors & mental-health professionals · Law
+enforcement · Rehabilitation & welfare authorities.
