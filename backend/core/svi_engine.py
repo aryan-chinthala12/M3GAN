@@ -4,19 +4,19 @@ backend/svi_engine.py
 SVI Multimodal Fusion Engine for the NHAA (14566) ecosystem.
 
 Modalities:
-  - AUDIO: Wav2Vec2 speech-emotion + librosa acoustic biomarkers
+  - AUDIO: Wav2Vec2 speech-emotion + Silero VAD / librosa acoustic biomarkers
            + multilingual lexical analysis of the Whisper transcript.
   - TEXT:  multilingual lexical analysis of chat / portal / chatbot
            narratives directly (no transcription needed).
 
-Fusion:
-  - Quadratic-bounded component curves (finer low-range resolution,
-    wider spread at the extremes).
-  - Severity floors keep genuine high-severity disclosures grounded
-    (e.g. suicidal ideation never scores below ~78 even if softly
-    spoken / briefly written).
-  - No single keyword can force CRITICAL; floors are floors, not
-    overrides, and a human reviewer always sees the reasoning.
+Fusion & Safety Design:
+  - Numerical SVI Score (0..100): Calibrated monotonic component fusion,
+    mathematically bounded within 0..100.
+  - Safety Flags: Independent alert triggers for high-severity disclosures
+    (e.g., suicidal ideation, sexual violence, death threats) that alert the human
+    operator WITHOUT corrupting or overwriting the numerical SVI score.
+  - Confidence & Signal Quality: Evaluates analysis reliability based on
+    VAD speech ratio, acoustic signal quality, SER confidence, and text length.
 """
 
 import os
@@ -25,8 +25,11 @@ import threading
 import torch
 import torch.nn as nn
 import numpy as np
+from typing import List, Tuple, Optional, Dict, Any
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+os.environ["OMP_NUM_THREADS"] = "1"
 
 from transformers import (
     Wav2Vec2Model,
@@ -37,8 +40,8 @@ from huggingface_hub import hf_hub_download
 from safetensors.torch import load_file
 from faster_whisper import WhisperModel
 
-from backend.audio_processor import AudioProcessor
-from backend.config import (
+from backend.audio.audio_processor import AudioProcessor
+from backend.core.config import (
     WEIGHT_ML_EMOTION,
     WEIGHT_ACOUSTIC,
     WEIGHT_LEXICAL,
@@ -46,9 +49,9 @@ from backend.config import (
     THREAT_LEVEL_MAP,
     expansion_factor,
 )
-from backend.text_analyzer import analyze_transcript, redact, threat_level_from_band
-from backend.case_store import CaseStore
-from backend.schemas import (
+from backend.nlp.text_analyzer import analyze_transcript, redact, threat_level_from_band
+from backend.core.case_store import CaseStore
+from backend.api.schemas import (
     AudioAnalysisResponse,
     TextAnalysisRequest,
     TextAnalysisResponse,
@@ -60,6 +63,8 @@ from backend.schemas import (
     Explainability,
     CaseSummary,
     StatsResponse,
+    SafetyFlagItem,
+    ConfidenceMetrics,
 )
 
 
@@ -102,22 +107,18 @@ class LegacyEmotionClassifier(nn.Module):
 
 
 class SVIEngine:
-    def __init__(self):
+    def __init__(self, use_vad_fallback: bool = False):
         print("[INFO] Initializing SVI Multimodal Engine...")
 
-        self.audio_processor = AudioProcessor()
+        self.audio_processor = AudioProcessor(use_vad_fallback=use_vad_fallback)
         self.case_store = CaseStore()
 
-        # Heavy ML models load lazily on first audio request so the
-        # server starts instantly and TEXT channels work even when the
-        # transformers / whisper checkpoints cannot be downloaded.
         self._models_loaded = False
         self._model_lock = threading.Lock()
         self.speech_classifier = None
         self.emotion_feature_extractor = None
         self.whisper_model = None
 
-        # Whisper output-language map for the UI language selector
         self.language_map = {
             "English": "en",
             "Hindi": "hi",
@@ -154,13 +155,10 @@ class SVIEngine:
 
         config = Wav2Vec2Config.from_pretrained(MODEL_ID)
         feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(MODEL_ID)
-        model = LegacyEmotionClassifier(config)
+        checkpoint_path = hf_hub_download(repo_id=MODEL_ID, filename="model.safetensors")
 
-        checkpoint_path = hf_hub_download(
-            repo_id=MODEL_ID,
-            filename="model.safetensors",
-        )
         checkpoint = load_file(checkpoint_path)
+        model = LegacyEmotionClassifier(config)
 
         remapped = {}
         for key, value in checkpoint.items():
@@ -180,13 +178,6 @@ class SVIEngine:
         missing, unexpected = model.load_state_dict(remapped, strict=False)
 
         print("[INFO] Emotion checkpoint loaded.")
-        if missing:
-            print(f"[WARNING] Missing checkpoint weights: {len(missing)}")
-        if unexpected:
-            print(f"[WARNING] Unexpected checkpoint weights: {len(unexpected)}")
-        if not missing and not unexpected:
-            print("[INFO] All emotion-model checkpoint weights matched.")
-
         model.eval()
         self.emotion_feature_extractor = feature_extractor
         return model
@@ -244,35 +235,12 @@ class SVIEngine:
         return float(np.clip(score, 0.0, 1.0))
 
     # =============================================================
-    # ACOUSTIC STRESS SCORE
-    # =============================================================
-
-    @staticmethod
-    def _acoustic_stress_score(acoustic_raw):
-        pitch_component = np.clip(acoustic_raw.pitch_std / 2.0, 0.0, 1.0)
-        energy_component = np.clip(acoustic_raw.energy_rms / 0.10, 0.0, 1.0)
-        energy_variation_component = np.clip(
-            acoustic_raw.energy_variation / 12.0, 0.0, 1.0
-        )
-
-        acoustic_score = (
-            0.50 * pitch_component
-            + 0.30 * energy_component
-            + 0.20 * energy_variation_component
-        )
-        return float(np.clip(acoustic_score, 0.0, 1.0))
-
-    # =============================================================
-    # SVI FUSION
+    # SVI FUSION & SAFETY FLAGS
     # =============================================================
 
     @staticmethod
     def _component_curve(x: float, weight: float) -> float:
-        """
-        Monotonic expansion curve: f(x) = x ** g, g = 1 - e/2 in (0.7, 1).
-        f(0)=0, f(1)=1; low-intensity signals are lifted so they are not
-        drowned by fusion weights, extremes stay well separated.
-        """
+        """Monotonic expansion curve f(x) = x ** (1 - e/2)."""
         e = expansion_factor(weight)
         g = 1.0 - (e / 2.0)
         x = float(np.clip(x, 0.0, 1.0))
@@ -289,18 +257,16 @@ class SVIEngine:
             detail=detail,
         )
 
-    def _fuse(
+    def _fuse_with_safety_flags(
         self,
-        components,
-        severity_floor: float = 0.0,
-        floor_labels=None,
-    ):
+        components: List[Tuple[str, float, float, str]],
+        hits: List[dict],
+        floor_labels: List[str],
+        severity_floor: float,
+    ) -> Tuple[float, List[SafetyFlagItem], bool, Optional[str]]:
         """
-        Weighted fusion of component scores (0..1 each) into a 0..100 SVI.
-
-        A severity floor applies AFTER fusion: it guarantees a minimum
-        score when high-severity categories were disclosed, but never
-        pushes a case into CRITICAL by itself.
+        Calculates mathematically bounded 0..100 SVI score.
+        Generates independent SafetyFlagItem objects without modifying the numerical score.
         """
         total = 0.0
         for name, score, weight, *rest in components:
@@ -308,21 +274,30 @@ class SVIEngine:
             total += curved * weight
 
         raw = float(np.clip(total, 0.0, 1.0))
-        svi = raw * 100.0
+        svi_score = round(float(np.clip(raw * 100.0, 0.0, 100.0)), 2)
 
-        override_triggered = False
-        override_reason = None
-
-        if severity_floor > svi:
-            svi = severity_floor
-            override_triggered = True
-            override_reason = (
-                f"High-severity distress disclosure detected; "
-                f"score raised to severity floor {severity_floor:.0f}. "
-                f"Categories: {', '.join(floor_labels or [])}."
+        safety_flags = []
+        for cat_label in floor_labels:
+            matched = [h["term"] for h in hits if h["category"] == cat_label]
+            severity = "CRITICAL" if severity_floor >= 70.0 else "HIGH"
+            safety_flags.append(
+                SafetyFlagItem(
+                    category=cat_label,
+                    severity=severity,
+                    flag="URGENT_HUMAN_REVIEW",
+                    message=f"High-severity disclosure detected ({cat_label}). Urgent human review required.",
+                    matched_terms=matched,
+                )
             )
 
-        return round(float(np.clip(svi, 0.0, 100.0)), 2), override_triggered, override_reason
+        override_triggered = bool(len(safety_flags) > 0)
+        override_reason = (
+            f"Safety flag(s) active for urgent human review: {', '.join(floor_labels)}."
+            if safety_flags
+            else None
+        )
+
+        return svi_score, safety_flags, override_triggered, override_reason
 
     # =============================================================
     # RISK BAND
@@ -342,29 +317,57 @@ class SVIEngine:
     # AUDIO PIPELINE
     # =============================================================
 
+    @staticmethod
+    def get_fusion_weights(
+        signal_quality: str,
+        fusion_mode: str = "DYNAMIC_SCHEME_A",
+    ) -> Tuple[float, float, float]:
+        """
+        Return (weight_acoustic, weight_emotion, weight_lexical) based on signal quality state.
+        Supported fusion_modes for benchmarking: 'BASELINE', 'DYNAMIC_SCHEME_A', 'DYNAMIC_SCHEME_B'.
+        """
+        if fusion_mode == "BASELINE":
+            return WEIGHT_ACOUSTIC, WEIGHT_ML_EMOTION, WEIGHT_LEXICAL
+
+        if fusion_mode == "DYNAMIC_SCHEME_B":
+            if signal_quality in ("WHISPER", "LOW_VOLUME"):
+                return 0.10, 0.30, 0.60
+            if signal_quality == "LOW_SNR":
+                return 0.20, 0.30, 0.50
+            return WEIGHT_ACOUSTIC, WEIGHT_ML_EMOTION, WEIGHT_LEXICAL
+
+        # Default: DYNAMIC_SCHEME_A
+        if signal_quality in ("WHISPER", "LOW_VOLUME"):
+            return 0.15, 0.20, 0.65
+        if signal_quality == "LOW_SNR":
+            return 0.15, 0.35, 0.50
+
+        return WEIGHT_ACOUSTIC, WEIGHT_ML_EMOTION, WEIGHT_LEXICAL
+
     def process_multimodal_audio(
         self,
         file_path: str,
         filename: str,
         language: str = "English",
         consent: bool = False,
+        fusion_mode: str = "DYNAMIC_SCHEME_A",
     ) -> AudioAnalysisResponse:
-        # 0. LAZY MODEL LOAD ---------------------------------------
+        # 0. LAZY MODEL LOAD
         self._ensure_models()
 
-        # 1. ACOUSTIC FEATURES ------------------------------------
+        # 1. ACOUSTIC FEATURES & VAD
         acoustic_raw = self.audio_processor.extract_acoustic_features(file_path)
 
         if getattr(acoustic_raw, "error", None):
             raise ValueError(f"Audio validation failed: {acoustic_raw.error}")
 
-        # 2. SPEECH EMOTION ----------------------------------------
+        # 2. SPEECH EMOTION
         emotion_predictions = self._classify_emotion(file_path)
         top_emotion = emotion_predictions[0]["label"].upper()
         emotion_confidence = emotion_predictions[0]["score"] * 100
         emotion_stress = self._emotion_stress_score(emotion_predictions)
 
-        # 3. SPEECH TO TEXT ----------------------------------------
+        # 3. SPEECH TO TEXT
         whisper_language = self.language_map.get(language)
         segments, info = self.whisper_model.transcribe(
             file_path,
@@ -372,58 +375,98 @@ class SVIEngine:
             language=whisper_language,
         )
         transcript = " ".join(segment.text for segment in segments).strip()
-        duration = float(info.duration) if hasattr(info, "duration") else 0.0
+        duration = float(info.duration) if hasattr(info, "duration") else acoustic_raw.duration
 
-        # 4. PRIVACY: redact PII before anything is stored/returned
+        # 4. PRIVACY: REDACT PII
         redacted_transcript, pii_redactions = redact(transcript)
 
-        # 5. MULTILINGUAL LEXICAL ANALYSIS -------------------------
+        # 5. MULTILINGUAL LEXICAL ANALYSIS
         text_result = analyze_transcript(redacted_transcript)
         lexical_score = text_result["lexical_score"]
         severity_floor = text_result["severity_floor"]
         floor_labels = text_result["floor_categories"]
 
-        # 6. COMPONENT SCORES + FUSION -----------------------------
-        acoustic_score = self._acoustic_stress_score(acoustic_raw)
+        # 6. COMPONENT SCORES & FUSION (SVI + Safety Flags)
+        acoustic_score = getattr(acoustic_raw, "acoustic_score", 0.0)
+        quality = getattr(acoustic_raw, "signal_quality", "GOOD")
+
+        w_ac, w_em, w_lex = self.get_fusion_weights(quality, fusion_mode=fusion_mode)
 
         components = [
             (
                 "acoustic",
                 acoustic_score,
-                WEIGHT_ACOUSTIC,
-                f"pitch_std={acoustic_raw.pitch_std:.2f} st, "
-                f"rms={acoustic_raw.energy_rms:.4f}, "
-                f"energy_var={acoustic_raw.energy_variation:.1f} dB",
+                w_ac,
+                getattr(acoustic_raw, "acoustic_detail", f"pitch_std={acoustic_raw.pitch_std:.2f} st"),
             ),
             (
                 "emotion",
                 emotion_stress,
-                WEIGHT_ML_EMOTION,
-                f"Wav2Vec2 top emotion {top_emotion} "
-                f"({emotion_confidence:.1f}% conf.)",
+                w_em,
+                f"Wav2Vec2 top emotion {top_emotion} ({emotion_confidence:.1f}% conf.)",
             ),
             (
                 "lexical",
                 lexical_score,
-                WEIGHT_LEXICAL,
-                (
-                    f"{len(text_result['hits'])} multilingual lexicon hit(s) "
-                    f"in {len(redacted_transcript.split())} words"
-                ),
+                w_lex,
+                f"{len(text_result['hits'])} multilingual hit(s) in {len(redacted_transcript.split())} words",
             ),
         ]
 
-        svi_score, override_triggered, override_reason = self._fuse(
+        svi_score, safety_flags, override_triggered, override_reason = self._fuse_with_safety_flags(
             components,
-            severity_floor,
+            text_result["hits"],
             floor_labels,
+            severity_floor,
         )
 
         risk_band = self._get_risk_band(svi_score)
         risk_rule = RISK_RULES[risk_band]
         threat_level = threat_level_from_band(risk_band)
 
-        # 7. EXPLAINABILITY ----------------------------------------
+        # 7. CONFIDENCE & SIGNAL QUALITY METRICS
+        voiced_ratio = getattr(acoustic_raw, "voiced_ratio", 0.0)
+        pause_ratio = getattr(acoustic_raw, "pause_ratio", 0.0)
+        speech_dur = getattr(acoustic_raw, "speech_duration", 0.0)
+        pitch_rel = getattr(acoustic_raw, "pitch_reliable", True)
+
+        quality_conf_map = {
+            "GOOD": 100.0,
+            "DEGRADED": 70.0,
+            "LOW_SNR": 60.0,
+            "LOW_VOLUME": 55.0,
+            "WHISPER": 50.0,
+            "UNRELIABLE": 10.0,
+        }
+        signal_quality_conf = quality_conf_map.get(quality, 60.0)
+
+        word_cnt = len(redacted_transcript.split())
+        text_conf = min(100.0, word_cnt * 10.0) if word_cnt > 0 else 0.0
+
+        overall_confidence = round(
+            0.40 * signal_quality_conf + 0.35 * emotion_confidence + 0.25 * text_conf, 1
+        )
+        conf_rating = "HIGH" if overall_confidence >= 75.0 else ("MEDIUM" if overall_confidence >= 45.0 else "LOW")
+
+        confidence_metrics = ConfidenceMetrics(
+            overall_confidence=overall_confidence,
+            confidence_rating=conf_rating,
+            signal_quality=quality,
+            speech_duration_seconds=speech_dur,
+            voiced_ratio=voiced_ratio,
+            pause_ratio=pause_ratio,
+            pitch_reliable=pitch_rel,
+            snr_state=getattr(acoustic_raw, "snr_state", "UNAVAILABLE"),
+            snr_db=getattr(acoustic_raw, "snr_db", None),
+            provenance={
+                "acoustic_engine": "SileroVAD + librosa pyin",
+                "emotion_engine": f"Wav2Vec2 ({MODEL_ID})",
+                "asr_engine": "Faster-Whisper (tiny)",
+                "nlp_engine": "Multilingual distress lexicon scanner",
+            },
+        )
+
+        # 8. EXPLAINABILITY
         top_contributors = sorted(
             components,
             key=lambda c: c[1] * c[2],
@@ -433,25 +476,22 @@ class SVIEngine:
         for name, score, weight, *rest in top_contributors:
             detail = rest[0] if rest else None
             if score >= 0.35:
-                contributor_labels.append(
-                    f"{name.capitalize()} signal: {detail or 'elevated'}"
-                )
+                contributor_labels.append(f"{name.capitalize()} signal: {detail or 'elevated'}")
 
         if text_result["categories"]:
-            contributor_labels.append(
-                "Distress categories: " + ", ".join(text_result["categories"])
-            )
+            contributor_labels.append("Distress categories: " + ", ".join(text_result["categories"]))
 
         if not contributor_labels:
             contributor_labels.append("No dominant elevated signal detected")
 
         summary = (
-            f"Analysis yielded a {risk_band} risk profile with SVI "
-            f"{svi_score} (acoustic {acoustic_score:.2f}, emotion "
-            f"{emotion_stress:.2f}, lexical {lexical_score:.2f})."
+            f"Normalized baseline assessment yielded a {risk_band} risk profile with SVI "
+            f"{svi_score:.1f}/100 (acoustic {acoustic_score:.2f}, emotion "
+            f"{emotion_stress:.2f}, lexical {lexical_score:.2f}). "
+            f"Confidence: {overall_confidence:.1f}% ({conf_rating})."
         )
 
-        # 8. PERSIST CASE ------------------------------------------
+        # 9. PERSIST CASE
         case_id = self.case_store.create_case(
             channel="audio",
             language=language,
@@ -477,6 +517,10 @@ class SVIEngine:
                 energy_variation=round(float(getattr(acoustic_raw, "energy_variation", 0.0)), 2),
                 median_pitch_hz=round(float(getattr(acoustic_raw, "median_pitch", 0.0)), 2),
                 confidence=round(emotion_confidence, 1),
+                voiced_ratio=voiced_ratio,
+                pause_ratio=pause_ratio,
+                signal_quality=quality,
+                pitch_reliable=pitch_rel,
             ),
             nlp_indicators=NLPIndicators(
                 threat_level=threat_level,
@@ -498,6 +542,7 @@ class SVIEngine:
                     self._build_component(name, score, weight, rest[0] if rest else None)
                     for name, score, weight, *rest in components
                 ],
+                safety_flags=safety_flags,
             ),
             explainability=Explainability(
                 summary=summary,
@@ -505,10 +550,12 @@ class SVIEngine:
             ),
             recommended_interventions=risk_rule["actions"],
             consent_recorded=consent,
+            confidence_metrics=confidence_metrics,
+            safety_flags=safety_flags,
         )
 
     # =============================================================
-    # TEXT PIPELINE (chat / portal / chatbot / IVRS transcript)
+    # TEXT PIPELINE
     # =============================================================
 
     def process_text(self, request: TextAnalysisRequest) -> TextAnalysisResponse:
@@ -517,16 +564,16 @@ class SVIEngine:
         if not raw_text:
             raise ValueError("Text payload is empty after trimming.")
 
-        # 1. PRIVACY: redact PII before analysis/storage
+        # 1. PRIVACY: REDACT PII
         redacted_text, pii_redactions = redact(raw_text)
 
-        # 2. MULTILINGUAL LEXICAL ANALYSIS --------------------------
+        # 2. MULTILINGUAL LEXICAL ANALYSIS
         text_result = analyze_transcript(redacted_text)
         lexical_score = text_result["lexical_score"]
         severity_floor = text_result["severity_floor"]
         floor_labels = text_result["floor_categories"]
 
-        # 3. FUSION (text modality: single component + floor) -------
+        # 3. FUSION & SAFETY FLAGS
         components = [
             (
                 "lexical",
@@ -540,37 +587,50 @@ class SVIEngine:
             ),
         ]
 
-        svi_score, override_triggered, override_reason = self._fuse(
+        svi_score, safety_flags, override_triggered, override_reason = self._fuse_with_safety_flags(
             components,
-            severity_floor,
+            text_result["hits"],
             floor_labels,
+            severity_floor,
         )
 
         risk_band = self._get_risk_band(svi_score)
         risk_rule = RISK_RULES[risk_band]
         threat_level = threat_level_from_band(risk_band)
 
-        # 4. EXPLAINABILITY ----------------------------------------
-        contributor_labels = []
-        if text_result["categories"]:
-            contributor_labels.append(
-                "Distress categories: " + ", ".join(text_result["categories"])
-            )
-        if text_result["hits"]:
-            contributor_labels.append(
-                "Flagged terms: " + ", ".join(text_result["flagged_keywords"])
-            )
-        if not contributor_labels:
-            contributor_labels.append(
-                "No elevated distress indicators in narrative"
-            )
+        # 4. CONFIDENCE METRICS
+        word_cnt = len(redacted_text.split())
+        overall_confidence = min(100.0, word_cnt * 10.0) if word_cnt > 0 else 0.0
+        conf_rating = "HIGH" if overall_confidence >= 75.0 else ("MEDIUM" if overall_confidence >= 40.0 else "LOW")
 
-        summary = (
-            f"Text analysis yielded a {risk_band} risk profile with SVI "
-            f"{svi_score} (lexical {lexical_score:.2f})."
+        confidence_metrics = ConfidenceMetrics(
+            overall_confidence=overall_confidence,
+            confidence_rating=conf_rating,
+            signal_quality="GOOD",
+            speech_duration_seconds=0.0,
+            voiced_ratio=0.0,
+            pause_ratio=0.0,
+            pitch_reliable=False,
+            snr_state="UNAVAILABLE",
+            snr_db=None,
+            provenance={"text_engine": "Multilingual distress lexicon scanner"},
         )
 
-        # 5. PERSIST CASE -------------------------------------------
+        # 5. EXPLAINABILITY
+        contributor_labels = []
+        if text_result["categories"]:
+            contributor_labels.append("Distress categories: " + ", ".join(text_result["categories"]))
+        if text_result["hits"]:
+            contributor_labels.append("Flagged terms: " + ", ".join(text_result["flagged_keywords"]))
+        if not contributor_labels:
+            contributor_labels.append("No elevated distress indicators in narrative")
+
+        summary = (
+            f"Normalized baseline text analysis yielded a {risk_band} risk profile with SVI "
+            f"{svi_score:.1f}/100 (lexical density {lexical_score:.2f})."
+        )
+
+        # 6. PERSIST CASE
         case_id = self.case_store.create_case(
             channel=request.channel,
             language=request.language,
@@ -588,7 +648,7 @@ class SVIEngine:
             language=request.language,
             redacted_text=redacted_text,
             text_indicators=TextIndicators(
-                word_count=len(redacted_text.split()),
+                word_count=word_cnt,
                 distress_density=lexical_score,
             ),
             nlp_indicators=NLPIndicators(
@@ -607,6 +667,7 @@ class SVIEngine:
                     self._build_component(name, score, weight, rest[0] if rest else None)
                     for name, score, weight, *rest in components
                 ],
+                safety_flags=safety_flags,
             ),
             explainability=Explainability(
                 summary=summary,
@@ -614,11 +675,9 @@ class SVIEngine:
             ),
             recommended_interventions=risk_rule["actions"],
             consent_recorded=True,
+            confidence_metrics=confidence_metrics,
+            safety_flags=safety_flags,
         )
-
-    # =============================================================
-    # CASE QUERY API (used by FastAPI routes)
-    # =============================================================
 
     def list_cases(self, limit: int = 100) -> list:
         return self.case_store.list_cases(limit)

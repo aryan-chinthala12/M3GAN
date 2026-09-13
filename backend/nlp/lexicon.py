@@ -48,18 +48,20 @@ SUICIDAL_IDEATION = DistressCategory(
         # English
         "suicide", "kill myself", "end my life", "want to die",
         "no reason to live", "take my own life", "not worth living",
+        "suicide karne", "suicide karne jaa", "suicide karne jaa rahi",
         # Hindi (Devanagari + Romanized)
         "आत्महत्या", "खुदकुशी", "जान देना", "मरना चाहता", "मरना चाहती",
         "aatmahatya", "khudkushi", "khudkhushi", "jaan de dunga",
-        "jaan de dungi", "marna chahta", "marana chahati",
+        "jaan de dungi", "marna chahta", "marana chahati", "marna chahati",
+        "marne ki soch", "jaan de dunga",
         # Bengali
         "আত্মহত্যা", "মরতে চাই", "atmohotta", "morte chai",
         # Tamil
         "தற்கொலை", "சாக வேண்டும்", "tharkolai", "saaga vendum",
         # Telugu
-        "ఆత్మహత్య", "చస్తా", "atmahatya", "chastha", "chachipota",
+        "ఆత్మహత్య", "చస్తా", "atmahatya", "chastha", "chachipota", "champethanu",
         # Marathi
-        "आत्महत्या", "मरण्याला", "atmahatya", "maranyala",
+        "आत्महत्या", "मरण्याला", "स्वतःला संपवणार", "atmahatya", "maranyala", "sampavnar",
         # Kannada
         "ಆತ್ಮಹತ್ಯೆ", "ಸಾಯುತ್ತೇನೆ", "atmahatye", "saayuttene",
     ),
@@ -79,7 +81,7 @@ SELF_HARM = DistressCategory(
         "தன்னை காயம்", "விஷம்", "visham",
         "విషం", "visham",
         "स्वतःला इजा", "विष", "vish",
-        "ಸ್ವತಃ ಗಾಯ", "ವಿಷ", "visha",
+        "સ્वतઃ ગાય", "ವಿಷ", "visha",
     ),
 )
 
@@ -89,12 +91,12 @@ SEXUAL_VIOLENCE = DistressCategory(
     weight=0.80,
     floor=55.0,
     terms=(
-        "rape", "raped", "gang rape", "gangrape", "molested",
-        "sexual assault", "sexually assaulted",
+        "rape", "raped", "raped me", "gang rape", "gangrape", "molested",
+        "sexual assault", "sexually assaulted", "forced myself",
         "बलात्कार", "दुष्कर्म", "छेड़छाड़", "सामूहिक बलात्कार",
-        "balatkar", "dushkarm", "chhedchhad", "gass",
+        "balatkar", "dushkarm", "chhedchhad", "gass", "balatkar kiya",
         "ধর্ষণ", "গণধর্ষণ", "dhorthon", "gondhorthon",
-        "பாலியல் வன்முறை", "கற்பழிப்பு", "pazhuppu", "kalavippu",
+        "பாலியல் வன்முறை", "கற்பழிப்பு", "pazhuppu", "kalavippu", "paaliyal vanmurai",
         "అత్యాచారం", "బలాత్కారం", "atyacharam", "balatkaaram",
         "बलात्कार", "अत्याचार", "balatkar",
         "ಅತ್ಯಾಚಾರ", "ಬಲಾತ್ಕಾರ", "atyaachara", "balaatkaara",
@@ -109,12 +111,15 @@ VIOLENCE_THREAT = DistressCategory(
     terms=(
         "kill me", "killed", "murder", "murdered", "beat me",
         "beaten", "they will kill", "threat to kill", "attacked",
-        "broken my", "burned my house", "burnt my house",
+        "broken my", "burned my house", "burnt my house", "physical assault",
+        "physically assaulted", "threaten to kill", "threaten me",
+        "knife", "blade", "gun", "sword", "pistol", "dagger", "weapon",
         "मार डालेंगे", "मार दिया", "मारपीट", "पीटा", "हत्या", "खून",
-        "मेरे घर में आग",
+        "मेरे घर में आग", "जान से मारने", "धमकी दी", "चाकू", "तलवार",
         "maar dalenge", "mar dalenge", "maar diya", "maar peet",
-        "peeta", "hatya", "khoon", "kaat dalenge", "maarenge",
-        "খুন", "পিটিয়েছে", "মেরে ফেলবে", "khun", "piteche", "mere felbe",
+        "peeta", "hatya", "khoon", "kaat dalenge", "maarenge", "chaku", "chaaku", "chhuri", "talwar",
+        "jaan se marne", "marne ki dhamki", "dhamki de rahe", "dhamki di",
+        "khun", "piteche", "mere felbe",
         "கொலை", "அடிச்சாங்க", "அடித்தாங்க", "kolai", "adichanga", "adithanga",
         "చంపేస్తారు", "కొట్టారు", "హత్య", "champesaru", "kottaru", "hatya",
         "मारणार", "मारलं", "मारहाणी", "खून", "maranar", "marla", "marhani",

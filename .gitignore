@@ -1,53 +1,62 @@
-# Logs
+# M3GAN Repository Git Ignore Configuration
+
+# Logs & Temporary Execution Output
 *.log
+server.log
+vite.log
+debug_models.log
+step_log.txt
+load_err.txt
+benchmark_output.txt
+benchmark_results.txt
+phase5c_benchmark_report.txt
 
 # Databases
 *.db
 *.sqlite
 *.sqlite3
 
-# Cache and local tooling directories
+# Cache & Local Tooling Directories
 .freebuff/
-
-# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
 
 # Python Virtual Environments
 venv/
 env/
 ENV/
+.venv/
 env.bak/
 venv.bak/
-.venv/
-hermes-agent/
 
-# Datasets (Keep git repository light; do not track raw audio datasets)
+# Datasets & ML Model Weights
 dataset/
 *.flac
 *.m4a
-
-# Machine Learning Models / Large Artifacts
 *.pkl
 *.h5
 *.onnx
 *.pth
 *.pt
 
-# VS Code & IDE files
+# Node Modules & Frontend Build Output
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+.vite/
+frontend/.vite/
+
+# Editor & OS Files
 .vscode/
 .idea/
 *.swp
 *.swo
-
-# Environment variables & secrets
-.env
-.env.local
-
-# Operating System Files
 .DS_Store
 Thumbs.db
+
+# Environment Variables & Secrets
+.env
+.env.local

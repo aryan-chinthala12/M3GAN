@@ -1,26 +1,27 @@
+# M3GAN Backend Python Dependencies
+# Core Backend Framework & Server API
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+python-multipart>=0.0.9
+pydantic>=2.6.0
+python-dotenv>=1.0.1
+
 # Audio Signal Processing & DSP
 librosa>=0.10.1
 soundfile>=0.12.1
 scipy>=1.11.0
 numpy>=1.26.0
 
-# FastAPI Backend Server
-fastapi>=0.110.0
-uvicorn[standard]>=0.28.0
-python-multipart>=0.0.9
-pydantic>=2.6.0
-
-# Machine Learning & Speech Models
+# Machine Learning & Speech Processing Models
 torch>=2.2.0
 transformers>=4.38.0
 faster-whisper>=1.0.0
 huggingface-hub>=0.21.0
 
-# Streamlit Frontend UI
-streamlit>=1.32.0
-streamlit-mic-recorder>=0.0.8
+# Hardware Audio Ingestion
+pyaudio>=0.2.14
 
-# Data Visualization & Utilities
-matplotlib>=3.8.0
+# Benchmarks, Profiling & Utilities
 requests>=2.31.0
-python-dotenv>=1.0.1
+matplotlib>=3.8.0
+psutil>=5.9.0

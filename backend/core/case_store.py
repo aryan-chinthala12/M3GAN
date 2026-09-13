@@ -18,9 +18,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from backend.schemas import CaseSummary, StatsResponse
+from backend.api.schemas import CaseSummary, StatsResponse
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "cases.db"
+DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent.parent / "data" / "cases.db"
 
 
 class CaseStore:

@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from backend.lexicon import _COMPILED, scan_text, redact_pii
-from backend.text_analyzer import analyze_transcript
+from backend.nlp.lexicon import _COMPILED, scan_text, redact_pii
+from backend.nlp.text_analyzer import analyze_transcript
 
 
 def show(label, text):

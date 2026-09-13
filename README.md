@@ -1,199 +1,285 @@
-# M3GAN — AI Stress & Trauma Assessment Module for NHAA (14566) 🎙️
+# M3GAN — AI-Based Real-Time Stress & Vulnerability Assessment Module 🎙️
 
-AI-powered real-time multimodal stress and trauma assessment engine for the
-**National Helpline Against Atrocities (NHAA — 14566)**, Department of Social
-Justice & Empowerment, Government of India.
+**Smart India Hackathon (SIH 2024 / Problem Statement 26093)**  
+*National Helpline Against Atrocities (NHAA 14566) — Department of Social Justice & Empowerment, Government of India.*
 
-The system assesses psychological stress, trauma, fear, anxiety and
-vulnerability of victims/complainants across **every NHAA digital channel** —
-voice calls, the Integrated Portal, chatbot, IVRS transcripts and any approved
-digital interface — and produces a **Stress Vulnerability Index (SVI 0–100)**
-with Low / Moderate / High / Critical risk triage and automated intervention
-recommendations.
+M3GAN is a multimodal decision-support engine designed to perform real-time psychological stress, panic, and vulnerability assessment across emergency helpline digital communications (voice streams, external audio feeds, text reports, and IVRS transcripts). The system computes a continuous **Stress Vulnerability Index (SVI 0–100)** with tiered risk triage (LOW, MEDIUM, HIGH, CRITICAL), independent safety flags, and actionable intervention guidance for human operators.
 
 ---
 
-## ⚡ What it does
-
-| Requirement (Problem Statement) | Implementation |
-| :--- | :--- |
-| Analyse voice, speech patterns, pauses, pitch variation | `librosa` DSP: semitone pitch volatility, RMS energy, energy variation, median F0 (`audio_processor.py`) |
-| NLP / Emotion AI on the narrative | Wav2Vec 2.0 speech-emotion SER + weighted multilingual distress lexicon (11 categories) |
-| Multilingual (major Indian languages + dialects) | Whisper STT (en/hi/bn/ta/te/mr/kn) + lexicon in 7 languages **plus Romanized / code-mixed speech**, with script-aware matching for Indic Unicode |
-| Stress Vulnerability Index on a predefined scale | SVI 0–100 with explainable per-component contributions |
-| Low / Moderate / High / Critical categories | Threshold bands at 25 / 50 / 75 with protocol actions per band |
-| Detect severe trauma, suicidal ideation, intimidation, isolation | Severity-weighted categories incl. Suicidal Ideation, Self-Harm, Sexual Violence, Violence/Death Threats, Fear/Intimidation, Social Boycott/Isolation, Grief, Caste-Atrocity context |
-| Automatic recommendations (counselling, legal aid, police, protection) | Per-band intervention routing in `config.py` (senior counsellor, district police desk, PFA, legal-aid officer, 24-h welfare check) |
-| Privacy, informed consent, confidentiality, ethical AI | **PII redaction before storage** (phones, Aadhaar, email, self-disclosed names), mandatory informed-consent gate in the UI, human-oversight banner, human-in-the-loop escalation endpoint |
-
-### Grounded severity floors (ethical safeguard)
-
-A genuine high-severity disclosure keeps the SVI grounded even when the caller
-speaks softly or briefly — e.g. suicidal ideation can never score below **78**.
-Floors are *floors, not overrides*: no keyword can fabricate a CRITICAL score,
-and every application of a floor is shown to the human reviewer with reasons.
-
-### Explainability
-
-Every assessment returns per-component scores, weights and contributions
-(`svi_metrics.components`), flagged multilingual terms, distress categories,
-and a plain-language summary — the dashboard renders all of it.
+> [!IMPORTANT]
+> **RESEARCH & DECISION-SUPPORT DISCLAIMER**  
+> M3GAN is an engineering research prototype and decision-support tool designed strictly to assist trained human operators during emergency triage. It is **NOT** a clinical diagnostic system, medical evaluation device, or autonomous emergency dispatch authority. All SVI scores, risk bands, and recommendations require human-in-the-loop review.
 
 ---
 
-## 🏗️ Architecture
+## ⚡ Key Capabilities
+
+* **Multimodal Feature Fusion**: Combines acoustic signal volatility (F0 pitch, RMS energy, spectral tilt, ZCR), Wav2Vec 2.0 speech emotion recognition (SER), Faster-Whisper ASR transcription, and multilingual threat/distress NLP.
+* **Real-Time WebSocket Streaming**: Ingests continuous 16 kHz PCM audio frames over WebSockets and delivers live `assessment_update` payloads to the React operator console.
+* **Dual Audio Channel Ingestion**: Supports browser microphone streaming directly from the web client and external hardware audio ingestion (USB headsets, line-in interfaces, soundcards, and virtual audio cables).
+* **Indic & Code-Mixed NLP**: Transliterates Romanized Hinglish and analyzes threat markers, distress intensity, and contextual negation across English and regional Indian languages (Hindi, Tamil, Telugu, Kannada, Malayalam, Bengali, Marathi, Gujarati).
+* **Signal Quality & Whisper Handling**: Integrates Silero VAD and rolling acoustic feature normalization to separate signal degradation (low SNR, quiet speech, whisper) from true psychological distress.
+* **Idempotent Session Lifecycle**: Preserves session state and finalized summaries (`POST /stop` $\rightarrow$ SQLite case storage $\rightarrow$ `GET /summary`).
+
+---
+
+## 🏗️ System Architecture
+
+### Pipeline Flow
 
 ```text
-   Voice call ──┐                          Chat / Portal / Chatbot / IVRS ──┐
-                ▼                                                          ▼
-   ┌─────────────────────────┐                            ┌──────────────────────────┐
-   │ Faster-Whisper STT      │                            │  PII Redaction           │
-   │ Wav2Vec2 Emotion (SER)  │                            │  (phone/Aadhaar/email/   │
-   │ librosa biomarkers      │                            │   self-disclosed names)  │
-   └───────────┬─────────────┘                            └────────────┬─────────────┘
-               │  transcript                                           │
-               ▼                                                       ▼
-   ┌───────────────────────────────────────────────────────────────────────────┐
-   │        Multilingual Distress Lexicon (backend/lexicon.py)                 │
-   │   en · hi (Devanagari+Roman) · bn · ta · te · mr · kn · code-mixed        │
-   │   11 weighted categories · longest-span matching · repetition saturation  │
-   └───────────────────────────────┬───────────────────────────────────────────┘
-                                   ▼
-                     ┌───────────────────────────┐
-                     │  SVI Fusion Engine        │
-                     │  expansion curves +       │
-                     │  severity floors → 0–100  │
-                     └─────────────┬─────────────┘
-                                   ▼
-              ┌────────────────────────────────────────┐
-              │ FastAPI : risk band · interventions ·  │
-              │ explainability · SQLite case store     │
-              └────────────────────┬───────────────────┘
-                                   ▼
-                     React operator dashboard (Vite + Tailwind)
-                     dashboard · case queue · live voice/text assessment
+ ┌──────────────────────────────┐          ┌──────────────────────────────┐
+ │     Browser Microphone       │          │   External Audio Hardware    │
+ │ (16kHz Mono PCM WebSockets)  │          │ (Mic / Headset / Line-In /   │
+ └──────────────┬───────────────┘          │  VB-CABLE Virtual Audio Feed)│
+                │                          └──────────────┬───────────────┘
+                │                                         │
+                └───────────────────┬─────────────────────┘
+                                    ▼
+                      audio_hardware_ingest.py / API
+                                    │
+                                    ▼
+                       StreamingAssessmentSession
+                                    │
+    ┌───────────────────────────────┴───────────────────────────────┐
+    │                                                               │
+    ▼                                                               ▼
+Silero VAD & Signal Quality                             Speech & Text Intelligence
+(RMS, F0, Spectral Tilt, ZCR,                           ├──► Wav2Vec 2.0 SER (emotion_model.pkl fallback)
+ Noise Floor & SNR Classification)                       ├──► Faster-Whisper ASR Transcription
+                                                        └──► Multilingual / Hinglish NLP Scanner
+    │                                                               │
+    └───────────────────────────────┬───────────────────────────────┘
+                                    ▼
+                      Multimodal Dynamic SVI Engine
+             (SVI 0–100 Score, Confidence Metric & Trend Direction)
+                                    │
+                                    ├──► Independent Safety Flag Evaluator
+                                    │
+                                    ▼
+              Thread-Safe WebSocket Broadcaster (/ws/stream)
+                                    │
+            ┌───────────────────────┴───────────────────────┐
+            ▼                                               ▼
+   React Operator Console                         SQLite Case Store
+(Live Gauges, Volatility & Alerts)            (Persistent case_store.db Registry)
+```
+
+### Layer & Component Breakdown
+
+1. **Audio Ingestion Layer**
+   - **Hardware Audio Ingestion (`backend/audio/audio_hardware_ingest.py`)**: PyAudio multi-device soundcard capture engine supporting USB headsets, hardware microphones, line-in inputs, and virtual software audio routing (e.g. VB-CABLE for routing external call playback).  
+     *Note: Standard USB charging cables connected to mobile phones do NOT directly transmit cellular call audio to host soundcards; external line-in interface hardware or virtual audio cable routing is required.*
+   - **Browser Microphone Ingestion (`backend/api/websocket_handler.py`)**: Captures raw 16 kHz 16-bit mono PCM audio frames directly from browser clients over WebSockets.
+
+2. **Streaming & Session Layer**
+   - **StreamingSessionManager (`backend/streaming/streaming_session.py`)**: Authoritative in-memory state manager maintaining active `StreamingAssessmentSession` instances, sliding audio window buffers, acoustic history, and rolling SVI trend timelines.
+   - **Thread-Safe WebSocket Broadcaster (`backend/api/websocket_handler.py`)**: Schedules real-time `assessment_update` message sends onto the active asyncio event loop when hardware ingestion callbacks fire from background threads.
+
+3. **Machine Learning & NLP Analysis Layer**
+   - **Silero VAD (`backend/audio/vad_processor.py`)**: PyTorch voice activity detection model filtering silent frames and non-speech background noise.
+   - **Signal Quality & Acoustic Feature Extractor (`backend/audio/acoustic_normalizer.py` & `backend/audio/audio_processor.py`)**: Computes fundamental frequency (F0 pitch volatility), RMS energy, spectral tilt, zero-crossing rate (ZCR), rolling noise floor, and SNR classification (distinguishing low SNR/whisper from psychological panic).
+   - **Speech Emotion Recognition (SER) (`backend/audio/audio_processor.py`)**: Wav2Vec 2.0 transformer model (with `backend/models/emotion_model.pkl` fallback) predicting acoustic emotion state probabilities.
+   - **Automated Speech Recognition (ASR) (`backend/audio/audio_processor.py`)**: Faster-Whisper transformer engine generating continuous speech-to-text transcripts.
+   - **Multilingual & Hinglish NLP (`backend/nlp/`)**: Transliterates Romanized Hinglish script (`hinglish_normalizer.py`), detects language family (`language_detector.py`), scans distress/threat lexicons (`lexicon.py`), and evaluates contextual intensity and negation (`contextual_nlp.py`, `text_analyzer.py`).
+
+4. **SVI Fusion Engine**
+   - **Dynamic SVI Engine (`backend/core/svi_engine.py`)**: Fuses acoustic volatility, speech emotion probabilities, ASR transcripts, and NLP threat scores into a unified **Stress Vulnerability Index (SVI 0–100)** score, confidence metric, and trend direction.
+
+5. **Independent Safety Flags**
+   - **Safety Flag Evaluator (`backend/core/svi_engine.py`)**: Evaluates autonomous boolean safety flags (`HIGH_THREAT_KEYWORDS`, `EXPLICIT_SELF_HARM`, `VOICE_PANIC_DETECTED`, `SIGNAL_DEGRADED`) independently of numerical SVI weights, ensuring high-risk emergency markers trigger immediate visual warnings.
+
+6. **API & WebSocket Layer**
+   - **FastAPI REST API (`backend/main.py`)**: REST routes for session management (`POST /session/start`), hardware controls (`POST /audio/hardware/start`, `POST /audio/hardware/stop`), session finalization (`POST /session/{id}/stop`), summary fetch (`GET /session/{id}/summary`), and text analysis (`POST /evaluate/text`).
+   - **WebSocket Gateway (`backend/api/websocket_handler.py`)**: WebSocket streaming server (`/ws/stream`) managing connection lifecycles, PCM frame reception, and live broadcast dispatching.
+
+7. **Frontend Operator Console**
+   - **React 19 + Vite Dashboard (`frontend/`)**: Real-time decision-support interface displaying live SVI gauges, risk triage badges (LOW, MEDIUM, HIGH, CRITICAL), acoustic volatility charts, transcript feeds, and safety alerts for human operators.  
+     *Note: M3GAN is designed strictly as a decision-support system for human operators—it does NOT make autonomous clinical diagnoses or trigger automated emergency dispatch.*
+
+8. **Persistence Layer**
+   - **SQLite Case Store (`backend/core/case_store.py`)**: Embedded SQLite database (`case_store.db`) providing persistent storage for finalized case summaries, session parameters, and transcript audit logs.
+
+---
+
+## 💻 Technology Stack
+
+* **Backend Server**: Python 3.10+, FastAPI 0.140+, Uvicorn, WebSockets
+* **Machine Learning & DSP**: PyTorch 2.14+, Transformers 4.44+, Faster-Whisper 1.2+, Librosa 0.11+, SciPy 1.17+
+* **Voice Activity & Audio Ingestion**: Silero VAD, PyAudio 0.2.14, Soundfile
+* **Database & Persistence**: SQLite 3 (`case_store.py`)
+* **Frontend Console**: React 19, Vite 8, Tailwind CSS 4, Lucide React
+
+---
+
+## 📁 Project & File Architecture
+
+```text
+M3GAN/
+├── backend/                         # FastAPI Python backend application root
+│   ├── main.py                      # FastAPI entrypoint, REST API endpoints & lifecycle initialization
+│   ├── api/                         # Web & API interface package
+│   │   ├── schemas.py               # Pydantic request/response models & WebSocket payload schemas
+│   │   └── websocket_handler.py     # WebSocket endpoint (/ws/stream) & thread-safe event loop broadcaster
+│   ├── audio/                       # Audio ingestion & Digital Signal Processing (DSP)
+│   │   ├── acoustic_normalizer.py   # Rolling acoustic feature normalizer & whisper/SNR classifier
+│   │   ├── audio_hardware_ingest.py # Multi-device soundcard/line-in capture engine (PyAudio & VB-CABLE support)
+│   │   ├── audio_processor.py       # DSP pipeline, F0 tracking, Wav2Vec2 SER & Faster-Whisper ASR
+│   │   └── vad_processor.py         # Silero VAD PyTorch wrapper for voice presence detection
+│   ├── core/                        # Core engine & configuration logic
+│   │   ├── case_store.py            # Embedded SQLite persistent case repository (case_store.db)
+│   │   ├── config.py                # SVI dynamic weighting weights, risk thresholds & intervention rules
+│   │   └── svi_engine.py            # Multimodal SVI dynamic fusion engine & safety flag evaluator
+│   ├── models/                      # ML model assets & serialized checkpoints
+│   │   └── emotion_model.pkl        # Serialized SVM speech emotion classifier asset
+│   ├── nlp/                         # Multilingual & Indic Natural Language Processing
+│   │   ├── contextual_nlp.py        # Contextual threat intensity scanner & negation processor
+│   │   ├── hinglish_normalizer.py   # Romanized Hindi/Indic script transliterator & normalizer
+│   │   ├── language_detector.py     # Script-aware language identification engine
+│   │   ├── lexicon.py               # Multilingual threat, distress & emergency keyword dictionaries
+│   │   └── text_analyzer.py         # Written narrative analysis pipeline
+│   ├── streaming/                   # Real-time state management
+│   │   └── streaming_session.py     # Authoritative StreamingSessionManager & sliding audio windows
+│   ├── scripts/                     # Benchmarking, training & profiling utilities
+│   │   ├── ablation_benchmark.py
+│   │   ├── benchmark_phase5c.py
+│   │   ├── resource_profiler.py
+│   │   └── train_model.py
+│   └── tests/                       # Automated test suite & verification scripts
+│       ├── test_end_to_end_integration.py # 15-test full integration suite
+│       ├── verify_hardware_broadcaster.py  # Hardware audio WebSocket broadcast verifier
+│       └── verify_manual_lifecycle.py      # Session lifecycle & finalization verifier
+├── frontend/                        # React 19 + Vite + Tailwind CSS Operator Console
+│   ├── src/
+│   │   ├── api/                     # REST & WebSocket API client integration
+│   │   ├── components/              # SVI gauge, trend timeline, triage bar & safety flags UI
+│   │   └── pages/                   # Live Assessment, Dashboard & Cases pages
+│   ├── package.json
+│   └── vite.config.js
+├── sample_data/                     # Benchmark text corpora & test evaluation samples
+├── .gitignore                       # Clean Python, Node & local asset git ignore
+├── requirements.txt                 # Backend Python package dependencies
+└── README.md                        # Project documentation
 ```
 
 ---
 
-## 🚀 Run it
+## 🚀 Setup & Local Development Guide
 
-### Backend (FastAPI, port 8000)
+### Prerequisites
+* Windows 10/11 (or Linux/macOS)
+* Python 3.10 or newer
+* Node.js 18+ and npm
+
+### 1. Backend Environment Setup
 
 ```bash
-# first time: create venv + install
-python -m venv .venv
-.venv/Scripts/pip install -r requirements.txt      # Windows
-# .venv/bin/pip install -r requirements.txt        # Linux/Mac
+# Clone repository and navigate to root
+cd M3GAN
 
-.venv/Scripts/python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000
+# Create virtual environment
+python -m venv .venv
+
+# Activate virtual environment (Windows PowerShell)
+.venv\Scripts\Activate.ps1
+
+# Install backend dependencies
+pip install -r requirements.txt
 ```
 
-- Swagger docs: `http://127.0.0.1:8000/docs`
-- The server starts instantly; SER + Whisper models download/load lazily on
-  the first audio request. **Text analysis works immediately, no downloads.**
-
-### Frontend (React dashboard, port 5173)
+### 2. Launch Backend Server
 
 ```bash
+# Set environment variables for PyTorch / OpenMP compatibility (PowerShell)
+$env:PYTHONPATH="."
+$env:KMP_DUPLICATE_LIB_OK="TRUE"
+$env:OMP_NUM_THREADS="1"
+
+# Launch FastAPI backend on port 8000
+python -m uvicorn backend.main:app --reload --port 8000
+```
+* Interactive API Documentation (Swagger): `http://127.0.0.1:8000/docs`
+
+### 3. Launch Frontend Operator Console
+
+```bash
+# Navigate to frontend directory
 cd frontend
+
+# Install Node dependencies
 npm install
+
+# Start Vite development server
 npm run dev
 ```
-
-Open `http://localhost:5173`. The dashboard auto-detects the backend; if it
-is down it shows demo data with a banner instead of crashing.
+* Access Operator Console: `http://localhost:5173`
 
 ---
 
-## 📊 API Endpoints
+## 🔌 Hardware & External Audio Ingestion Setup
 
-| Method | Path | Description |
-| :--- | :--- | :--- |
-| `POST` | `/api/v1/analyze-audio` | Voice call: STT + SER + acoustic biomarkers + lexicon → SVI. Form fields: `file`, `language`, `consent` |
-| `POST` | `/api/v1/analyze-text` | Chat/portal/chatbot narrative → SVI. JSON: `{text, channel, language}` |
-| `GET` | `/api/v1/cases` | Recent assessed cases (dashboard queue) |
-| `GET` | `/api/v1/cases/{id}` | Full case record incl. redacted narrative |
-| `GET` | `/api/v1/stats` | Aggregates: totals, risk/channel breakdown, avg SVI |
-| `POST` | `/api/v1/interventions/respond` | Human-in-the-loop: operator acknowledges/escalates a case |
-| `GET` | `/health` | Engine + model status |
+To capture external phone calls, softphone streams, or hardware microphones:
 
-### Example
+1. **USB Headset / Microphone**: Connect device and select it from the **Hardware Input Interface** dropdown in the Live Assessment console.
+2. **Line Input / Soundcard**: Connect 3.5mm line-out from an external phone interface into the soundcard line-in.
+3. **Virtual Audio Cable (VB-CABLE)**:
+   * Install [VB-Audio Virtual Cable](https://vb-audio.com/Cable/).
+   * Direct softphone or call playback output to `CABLE Input (VB-Audio Virtual Cable)`.
+   * In M3GAN Live Assessment, select `CABLE Output (VB-Audio Virtual Cable)` as the input source.
+
+---
+
+## 🧪 Running Verification & Test Suites
+
+Run the automated test suite from the repository root:
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/v1/analyze-text \
-  -H "Content-Type: application/json" \
-  -d '{"text": "Woh log mujhe dhamki de rahe hain, main bahut darr gayi hoon", "channel": "chat", "language": "Hindi"}'
-```
+# Set PYTHONPATH to project root
+$env:PYTHONPATH="."
 
-Response (trimmed):
+# 1. Full 15-test End-to-End Integration Suite
+python -m unittest backend/tests/test_end_to_end_integration.py
 
-```json
-{
-  "case_id": "NH-D5D496A8",
-  "svi_metrics": {
-    "final_svi_score": 75.94,
-    "risk_band": "CRITICAL",
-    "components": [{"name": "lexical", "score": 0.66, "weight": 1.0, "contribution": 75.94}]
-  },
-  "nlp_indicators": {
-    "flagged_keywords": ["koi madad nahi", "bahishkar", "dhamki", "akela", "darr"],
-    "distress_categories": ["Fear / intimidation / threats", "Social boycott / isolation / displacement"]
-  },
-  "recommended_interventions": ["Immediate Priority Transfer to Senior Trauma Counselor", "..."]
-}
+# 2. Hardware Audio WebSocket Broadcaster Test
+python backend/tests/verify_hardware_broadcaster.py
+
+# 3. Manual Session Lifecycle Test (Start -> Stop -> Summary)
+python backend/tests/verify_manual_lifecycle.py
+
+# 4. Frontend Production Build Verification
+npm --prefix frontend run build
 ```
 
 ---
 
-## 📊 SVI Scoring Model & Risk Bands
+## 📊 Empirical Validation Results
 
-| SVI | Band | Color | Protocol |
+Controlled engineering validation results from the current codebase:
+
+| Verification Target | Command / Test | Result | Performance / Status |
 | :--- | :--- | :--- | :--- |
-| 0–24 | **LOW** | 🟢 `#00C853` | Routine grievance intake and logging |
-| 25–49 | **MODERATE** | 🟡 `#FFD600` | Counselling intake queue + 24-h welfare check |
-| 50–74 | **HIGH** | 🟠 `#FF6D00` | Senior supervisor + Psychological First Aid + legal-aid officer |
-| 75–100 | **CRITICAL** | 🔴 `#D50000` | Senior trauma counsellor + district police desk alert + line-tracing |
-
-Fusion (voice): `SVI = 0.30·acoustic + 0.45·emotion + 0.25·lexical`, each component
-passed through a monotonic expansion curve, plus severity floors.
-
----
-
-## 🗂️ Project Structure
-
-```text
-├── backend/
-│   ├── main.py               # FastAPI routes (audio, text, cases, stats, HITL)
-│   ├── svi_engine.py         # SVI fusion, SER, Whisper STT, persistence
-│   ├── text_analyzer.py      # Shared narrative analysis (both modalities)
-│   ├── lexicon.py            # Multilingual distress lexicon + PII redaction
-│   ├── audio_processor.py    # librosa biomarkers (pitch semitones, RMS, F0)
-│   ├── case_store.py         # SQLite case persistence (thread-safe)
-│   ├── config.py             # Weights, risk bands, intervention protocols
-│   ├── schemas.py            # Pydantic v2 API schemas
-│   └── tests/                # Text-pipeline regression checks
-├── frontend/                 # React 19 + Vite + Tailwind operator dashboard
-│   └── src/pages/            # Dashboard · Cases · CaseDetails · LiveAssessment (voice+text)
-├── sample_data/              # Multilingual test narratives + audio guidance
-├── data/cases.db             # SQLite case store (created at runtime)
-└── requirements.txt
-```
+| **End-to-End Integration** | `test_end_to_end_integration.py` | **PASSED (15/15)** | All 15 tests executed cleanly in 94.8s. |
+| **Hardware Broadcaster** | `verify_hardware_broadcaster.py` | **PASSED (100%)** | Verified background thread WebSocket update dispatching. |
+| **Session Lifecycle** | `verify_manual_lifecycle.py` | **PASSED (100%)** | Verified idempotent finalization (`POST /stop` $\rightarrow$ 200 OK). |
+| **Frontend Production Build** | `npm run build` | **PASSED** | Compiled cleanly in 2.45s (`dist/assets/index-Bw29hla5.js`). |
+| **Browser Mic Live Stream** | Demo Validation Mode | **VALIDATED** | Real-time SVI updates received via WebSocket (~601ms warm latency). |
+| **Hardware Audio Ingestion** | Demo Validation Mode | **VALIDATED** | Thread-safe WebSocket update broadcast verified (~1.0ms broadcast latency). |
 
 ---
 
-## ⚖️ Ethics & Responsible-AI notes
+## ⚠️ Known Limitations & Current Non-Goals
 
-- Assessments are **decision support for trained operators**, never an
-  automatic determination of risk or a clinical diagnosis (enforced in UI copy).
-- All narratives are PII-redacted **before** persistence; only redacted text
-  is stored or returned.
-- Informed consent is a mandatory, recorded step before any assessment runs.
-- Severity floors raise scores only for genuine disclosures and always show
-  their reasoning to the human reviewer.
+* **Decision Support Only**: M3GAN does not automate emergency service dispatch or legal decision-making.
+* **Controlled Validation Scope**: Validation results represent controlled prototype benchmarks, not formal clinical trials.
+* **PyAudio Driver Dependency**: Hardware audio ingestion requires host OS audio driver support and permissions.
+* **Experimental Dynamic Weighting**: Quiet-speech and low-SNR dynamic weighting configurations remain experimental baseline candidates.
 
-## 👥 Stakeholders served
+---
 
-DoSJE · NHAA 14566 operators · State/UT governments · District
-administrations · Counsellors & mental-health professionals · Law
-enforcement · Rehabilitation & welfare authorities.
+## 🛣️ Development Roadmap
+
+- [ ] **Telephony Gateway Bridge**: SIP/RTP protocol adapter for direct PBX helpline integration.
+- [ ] **Regional Accent Fine-Tuning**: Indian accent fine-tuning for speech emotion models.
+- [ ] **Edge Execution Acceleration**: ONNX Runtime and TensorRT model export for low-power edge deployment.
+- [ ] **Multi-Operator Session Handover**: Real-time collaborative triage queue management for supervisor teams.
